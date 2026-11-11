@@ -41,8 +41,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install numpy & soundfile for reference audio generation
-        run: pip install numpy soundfile
+      - name: Install Linux GUI & Audio Dev Dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
