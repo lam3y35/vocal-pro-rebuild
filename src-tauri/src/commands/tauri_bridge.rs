@@ -168,7 +168,7 @@ pub mod bridge {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
         let volumes = {
-            let guard = ctx.active_mixer.lock().unwrap();
+            let guard = ctx.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = guard.as_ref() {
                 m.snapshot()
                     .stems
@@ -196,7 +196,7 @@ pub mod bridge {
         bitrate: Option<String>,
     ) -> Result<Vec<String>, String> {
         let volumes = {
-            let guard = ctx.active_mixer.lock().unwrap();
+            let guard = ctx.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = guard.as_ref() {
                 m.snapshot()
                     .stems

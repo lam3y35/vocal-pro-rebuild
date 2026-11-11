@@ -281,7 +281,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
 
     try {
       // 1. Submit batch to real Rust backend
-      const promise = invokeCommand<JobRecord[]>("start_separation_batch", {
+      const promise = invokeCommandStrict<JobRecord[]>("start_separation_batch", {
         inputs: selectedFiles,
         outputDir: customOutputDir || "",
         options,
@@ -632,7 +632,7 @@ export const useMixerStore = create<MixerState>((set, get) => ({
     }
     const out = `${activeFolder}/stem_mix.${exportFormat}`;
     try {
-      const res = await invokeCommand<string>("mixer_export_mix", {
+      const res = await invokeCommandStrict<string>("mixer_export_mix", {
         outputPath: out,
         format: exportFormat,
         bitrate: exportBitrate,
@@ -652,7 +652,7 @@ export const useMixerStore = create<MixerState>((set, get) => ({
       return;
     }
     try {
-      const res = await invokeCommand<string[]>("mixer_export_separate", {
+      const res = await invokeCommandStrict<string[]>("mixer_export_separate", {
         outputDir: activeFolder,
         format: exportFormat,
         bitrate: exportBitrate,
@@ -672,7 +672,7 @@ export const useMixerStore = create<MixerState>((set, get) => ({
     if (!stem || !activeFolder) return;
     const out = `${activeFolder}/${stemName}.mid`;
     try {
-      const res = await invokeCommand<string>("export_stem_midi", {
+      const res = await invokeCommandStrict<string>("export_stem_midi", {
         inputPath: stem.path,
         outputMidiPath: out,
       });
@@ -804,7 +804,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   downloadMediaUrl: async (url, customName) => {
     try {
       useJobsStore.getState().appendLog(`[download] Fetching direct media from ${url}...`);
-      const result = await invokeCommand<DownloadHistoryEntry>("download_media_url", {
+      const result = await invokeCommandStrict<DownloadHistoryEntry>("download_media_url", {
         url,
         custom_name: customName?.trim() || undefined,
         customName: customName?.trim() || undefined,
@@ -815,9 +815,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         }));
         useJobsStore.getState().addFiles([result.path]);
         useJobsStore.getState().appendLog(`[download] Successfully downloaded "${result.title}" -> ${result.path}`);
+        useSystemStore.getState().showBanner(`Downloaded media: "${result.title}"`);
       }
     } catch (err: any) {
-      useJobsStore.getState().appendLog(`[download_err] Failed to download ${url}: ${err?.message || err}`);
+      const msg = err?.message || String(err);
+      useJobsStore.getState().appendLog(`[download_err] Failed to download ${url}: ${msg}`);
+      useSystemStore.getState().showBanner(`Download error: ${msg}`);
     }
   },
   clearDownloadHistory: () => {
@@ -940,40 +943,39 @@ export const useSystemStore = create<SystemState>((set, get) => ({
     slots: [],
   },
   hardwareProfile: {
-    os_name: "Windows 11 / Linux x86_64",
+    os_name: "Detecting OS...",
     os_arch: "x86_64",
-    cpu_model: "Multi-Core AVX2 Workstation Processor",
-    physical_cores: 8,
-    logical_cores: 16,
-    simd_features: ["AVX2", "FMA", "SSE4.2"],
-    total_ram_mb: 16384,
-    available_ram_mb: 12288,
-    disk_free_gb: 142.5,
-    temp_drive_speed_mb_s: 1480.0,
+    cpu_model: "Probing CPU...",
+    physical_cores: 4,
+    logical_cores: 4,
+    simd_features: [],
+    total_ram_mb: 8192,
+    available_ram_mb: 4096,
+    disk_free_gb: 50.0,
+    temp_drive_speed_mb_s: 500.0,
     on_battery: false,
     power_source: "ac",
-    cuda_available: true,
+    cuda_available: false,
     mps_available: false,
-    gpu_name: "NVIDIA GeForce RTX (8 GB VRAM)",
-    vram_mb: 8192,
+    gpu_name: null,
+    vram_mb: null,
     non_cuda_gpu_name: null,
     non_cuda_gpu_note: null,
-    fp16_supported: true,
-    device_tier: "high_gpu",
-    tier_label: "High-Performance GPU (6-11GB VRAM)",
-    active_profile_mode: "Max Quality",
-    profile_changes_label:
-      "Max Quality profile sets: device=CUDA, workers=2, threads/job=8, segment=7.8s, shifts=1, overlap=0.25, fp16=True",
-    quality_impact_note: "Quality: Maximum Reference FP32/FP16 (Highest Vocal & Dialogue Quality)",
-    hardware_fingerprint: "9f41c8a20b17e3d4",
-    recommended_device: "cuda",
-    recommended_max_concurrent_jobs: 2,
-    recommended_threads_per_job: 8,
-    recommended_segment_s: 7.8,
+    fp16_supported: false,
+    device_tier: "balanced",
+    tier_label: "Detecting Hardware...",
+    active_profile_mode: "Balanced",
+    profile_changes_label: "Probing system hardware configuration...",
+    quality_impact_note: "Quality: Balanced Default",
+    hardware_fingerprint: "",
+    recommended_device: "auto",
+    recommended_max_concurrent_jobs: 1,
+    recommended_threads_per_job: 4,
+    recommended_segment_s: 6.0,
     recommended_overlap: 0.25,
     recommended_shifts: 1,
-    recommended_preset: "high",
-    recommended_fp16: true,
+    recommended_preset: "balanced",
+    recommended_fp16: false,
     recommended_parallel_dsp: true,
     recommended_safe_mode: false,
   },

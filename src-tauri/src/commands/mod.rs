@@ -389,12 +389,12 @@ impl AppContext {
         let stems = discover_stems_in_folder(path)?;
         let mixer = Arc::new(LiveStemMixer::load_stems(stems, path.to_path_buf())?);
         let snap = mixer.snapshot();
-        *self.active_mixer.lock().unwrap() = Some(mixer);
+        *self.active_mixer.lock().unwrap_or_else(|e| e.into_inner()) = Some(mixer);
         Ok(snap)
     }
 
     pub fn mixer_set_gain(&self, stem_name: &str, gain: f32) -> AppResult<MixerSnapshot> {
-        let guard = self.active_mixer.lock().unwrap();
+        let guard = self.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
         let mixer = guard
             .as_ref()
             .ok_or_else(|| AppError::InvalidInput("No folder loaded in mixer".to_string()))?;
@@ -403,7 +403,7 @@ impl AppContext {
     }
 
     pub fn mixer_set_mute(&self, stem_name: &str, mute: bool) -> AppResult<MixerSnapshot> {
-        let guard = self.active_mixer.lock().unwrap();
+        let guard = self.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
         let mixer = guard
             .as_ref()
             .ok_or_else(|| AppError::InvalidInput("No folder loaded in mixer".to_string()))?;
@@ -412,7 +412,7 @@ impl AppContext {
     }
 
     pub fn mixer_set_solo(&self, stem_name: &str, solo: bool) -> AppResult<MixerSnapshot> {
-        let guard = self.active_mixer.lock().unwrap();
+        let guard = self.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
         let mixer = guard
             .as_ref()
             .ok_or_else(|| AppError::InvalidInput("No folder loaded in mixer".to_string()))?;

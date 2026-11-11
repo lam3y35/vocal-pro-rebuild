@@ -91,6 +91,10 @@ fn current_hard_cap(cuda: bool, vram_mb: Option<u64>) -> usize {
 }
 
 impl WorkerSupervisor {
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, SupervisorInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn new(python_bin: PathBuf, worker_pythonpath: PathBuf, fast_test_model: bool) -> Self {
         let default_concurrency = compute_memory_aware_default_workers();
         let (event_tx, _) = broadcast::channel(512);
@@ -130,7 +134,7 @@ impl WorkerSupervisor {
     /// Current hard cap (RAM, physical cores, VRAM) for concurrent workers on this machine.
     pub fn hard_worker_cap(&self) -> usize {
         let (cuda, vram) = {
-            let g = self.inner.lock().unwrap();
+            let g = self.lock_inner();
             (g.health.cuda_available, g.health.vram_mb)
         };
         current_hard_cap(cuda, vram)
@@ -140,7 +144,7 @@ impl WorkerSupervisor {
         let cap = self.hard_worker_cap();
         let clamped = max_workers.clamp(1, cap);
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.max_concurrent_workers = clamped;
             guard.health.max_concurrent_workers = clamped as u32;
         }
@@ -148,18 +152,18 @@ impl WorkerSupervisor {
     }
 
     pub fn max_concurrent_workers(&self) -> usize {
-        self.inner.lock().unwrap().max_concurrent_workers
+        self.lock_inner().max_concurrent_workers
     }
 
     pub fn pause_queue(&self) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.lock_inner();
         guard.queue_paused = true;
         guard.health.queue_paused = true;
     }
 
     pub fn resume_queue(&self) {
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.queue_paused = false;
             guard.health.queue_paused = false;
         }
@@ -167,7 +171,7 @@ impl WorkerSupervisor {
     }
 
     pub fn is_queue_paused(&self) -> bool {
-        self.inner.lock().unwrap().queue_paused
+        self.lock_inner().queue_paused
     }
 
     pub fn set_job_priority(&self, job_id: &str, priority: &str) -> Option<JobRecord> {
@@ -179,11 +183,11 @@ impl WorkerSupervisor {
     }
 
     pub fn reorder_job(&self, job_id: &str, new_index: usize) -> bool {
-        self.inner.lock().unwrap().queue.reorder(job_id, new_index)
+        self.lock_inner().queue.reorder(job_id, new_index)
     }
 
     pub fn restore_jobs(&self, records: Vec<JobRecord>) {
-        self.inner.lock().unwrap().queue.restore_records(records);
+        self.lock_inner().queue.restore_records(records);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkerEvent> {
@@ -261,7 +265,7 @@ impl WorkerSupervisor {
         })?;
 
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             if let WorkerEvent::Ready {
                 worker_version,
                 torch_version,
@@ -317,7 +321,7 @@ impl WorkerSupervisor {
                     continue;
                 }
                 let Ok(ev) = serde_json::from_str::<WorkerEvent>(trimmed) else {
-                    let mut g = inner_out.lock().unwrap();
+                    let mut g = inner_out.lock().unwrap_or_else(|e| e.into_inner());
                     if g.logs.len() >= MAX_LOG_LINES {
                         g.logs.pop_front();
                     }
@@ -330,7 +334,7 @@ impl WorkerSupervisor {
 
                 let mut release_slot = false;
                 {
-                    let mut g = inner_out.lock().unwrap();
+                    let mut g = inner_out.lock().unwrap_or_else(|e| e.into_inner());
                     match &ev {
                         WorkerEvent::Progress {
                             job_id,
@@ -454,7 +458,7 @@ impl WorkerSupervisor {
             // Crash / SIGKILL Isolation (Fixes ISS-007):
             // If this worker slot exited while an active_job_id was still running, mark that job failed
             // and notify its pending waiter immediately without affecting other running worker slots!
-            let mut g = inner_out.lock().unwrap();
+            let mut g = inner_out.lock().unwrap_or_else(|e| e.into_inner());
             let mut crashed_job: Option<(String, Option<String>)> = None;
             if let Some(s) = g.slots.get_mut(slot_id) {
                 s.running = false;
@@ -495,7 +499,7 @@ impl WorkerSupervisor {
             let reader = BufReader::new(stderr);
             for line_res in reader.lines() {
                 let Ok(line) = line_res else { break };
-                let mut g = inner_err.lock().unwrap();
+                let mut g = inner_err.lock().unwrap_or_else(|e| e.into_inner());
                 if g.logs.len() >= MAX_LOG_LINES {
                     g.logs.pop_front();
                 }
@@ -538,27 +542,27 @@ impl WorkerSupervisor {
     }
 
     pub fn health(&self) -> WorkerHealth {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.lock_inner();
         Self::refresh_health_slots(&mut g);
         g.health.clone()
     }
 
     pub fn recent_logs(&self) -> Vec<String> {
-        self.inner.lock().unwrap().logs.iter().cloned().collect()
+        self.lock_inner().logs.iter().cloned().collect()
     }
 
     pub fn list_jobs(&self) -> Vec<JobRecord> {
-        self.inner.lock().unwrap().queue.list()
+        self.lock_inner().queue.list()
     }
 
     pub fn get_job(&self, job_id: &str) -> Option<JobRecord> {
-        self.inner.lock().unwrap().queue.get(job_id).cloned()
+        self.lock_inner().queue.get(job_id).cloned()
     }
 
     fn send_command_to_slot(&self, slot_id: usize, cmd: &HostCommand) -> AppResult<()> {
         let mut line = serde_json::to_string(cmd)?;
         line.push('\n');
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.lock_inner();
         let slot = guard
             .slots
             .get_mut(slot_id)
@@ -577,7 +581,7 @@ impl WorkerSupervisor {
         loop {
             let mut need_spawn: Option<usize> = None;
             {
-                let mut guard = self.inner.lock().unwrap();
+                let mut guard = self.lock_inner();
                 if !guard.queue_paused {
                     let max_w = guard.max_concurrent_workers.max(1);
                     // 1. Check if any already-running slot < max_w is idle
@@ -603,7 +607,7 @@ impl WorkerSupervisor {
 
             if let Some(slot_idx) = need_spawn {
                 self.spawn_slot(slot_idx)?;
-                let mut guard = self.inner.lock().unwrap();
+                let mut guard = self.lock_inner();
                 if !guard.queue_paused
                     && slot_idx < guard.slots.len()
                     && guard.slots[slot_idx].running
@@ -624,7 +628,7 @@ impl WorkerSupervisor {
 
     pub async fn request(&self, payload: HostCommandPayload) -> AppResult<WorkerEvent> {
         let ensure_slot_0 = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             guard.slots.is_empty() || !guard.slots[0].running
         };
         if ensure_slot_0 {
@@ -635,7 +639,7 @@ impl WorkerSupervisor {
         let cmd = HostCommand::new(id.clone(), payload);
         let (tx, rx) = oneshot::channel();
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.pending.insert(id, tx);
         }
         self.send_command_to_slot(0, &cmd)?;
@@ -651,7 +655,7 @@ impl WorkerSupervisor {
         options: JobOptions,
     ) -> AppResult<WorkerEvent> {
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.queue.enqueue(
                 job_id.clone(),
                 input_path.clone(),
@@ -673,12 +677,12 @@ impl WorkerSupervisor {
         );
         let (tx, rx) = oneshot::channel();
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.pending.insert(id, tx);
         }
 
         if let Err(e) = self.send_command_to_slot(slot_idx, &cmd) {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.job_to_slot.remove(&job_id);
             if let Some(s) = guard.slots.get_mut(slot_idx) {
                 s.active_job_id = None;
@@ -695,7 +699,7 @@ impl WorkerSupervisor {
 
     pub fn cancel_job(&self, job_id: &str) -> AppResult<()> {
         let target_slot = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             guard.job_to_slot.get(job_id).copied().unwrap_or(0)
         };
         let id = uuid::Uuid::new_v4().to_string();
@@ -711,20 +715,20 @@ impl WorkerSupervisor {
     pub fn restart(&self) -> AppResult<WorkerHealth> {
         self.shutdown();
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.health.restart_count += 1;
         }
         self.start()
     }
 
     pub fn shutdown(&self) {
-        let slot_count = { self.inner.lock().unwrap().slots.len() };
+        let slot_count = { self.lock_inner().slots.len() };
         for slot_idx in 0..slot_count {
             let id = uuid::Uuid::new_v4().to_string();
             let cmd = HostCommand::new(id, HostCommandPayload::Shutdown);
             let _ = self.send_command_to_slot(slot_idx, &cmd);
         }
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.lock_inner();
         for slot in &mut guard.slots {
             slot.stdin.take();
             if let Some(mut child) = slot.child.take() {

@@ -173,6 +173,10 @@ pub fn default_config_map() -> serde_json::Map<String, Value> {
 }
 
 impl AppDatabase {
+    fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn open(db_path: &Path) -> AppResult<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -190,7 +194,7 @@ impl AppDatabase {
     fn seed_defaults_if_missing(&self) -> AppResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let defaults = default_config_map();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         for (k, v) in defaults {
             let val_str = serde_json::to_string(&v)?;
             conn.execute(
@@ -207,13 +211,13 @@ impl AppDatabase {
         extra_config_paths: &[PathBuf],
         output_scan_roots: &[PathBuf],
     ) -> AppResult<migration::MigrationReport> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         migration::run_legacy_migration(&conn, app_data_dir, extra_config_paths, output_scan_roots)
     }
 
     pub fn get_all_settings(&self) -> AppResult<HashMap<String, Value>> {
         let mut map: HashMap<String, Value> = default_config_map().into_iter().collect();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare("SELECT key, value_json FROM settings")?;
         let rows = stmt.query_map([], |row| {
             let k: String = row.get(0)?;
@@ -231,7 +235,7 @@ impl AppDatabase {
 
     pub fn update_settings(&self, updates: &HashMap<String, Value>) -> AppResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         for (k, v) in updates {
             let v_str = serde_json::to_string(v)?;
             conn.execute(
@@ -251,7 +255,7 @@ impl AppDatabase {
             .ok_or_else(|| AppError::InvalidInput(format!("Unknown setting key: {}", key)))?;
         let now = chrono::Utc::now().to_rfc3339();
         let v_str = serde_json::to_string(&default_val)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
@@ -264,7 +268,7 @@ impl AppDatabase {
         let now = chrono::Utc::now().to_rfc3339();
         let defaults = default_config_map();
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn();
             conn.execute("DELETE FROM settings", [])?;
             for (k, v) in &defaults {
                 let v_str = serde_json::to_string(v)?;
@@ -298,7 +302,7 @@ impl AppDatabase {
             JobStatus::Failed => "failed",
             _ => "running",
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO jobs (id, input_path, output_dir, model, output_mode, options_json, status, error_code, error_message, created_at, elapsed_s)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -326,7 +330,7 @@ impl AppDatabase {
     }
 
     pub fn load_resumable_jobs(&self) -> AppResult<Vec<JobRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, input_path, output_dir, options_json, created_at
              FROM jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC",
@@ -382,7 +386,7 @@ impl AppDatabase {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
         let stems_json = serde_json::to_string(stems)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         if let Some(jid) = job_id {
             conn.execute(
                 "INSERT INTO jobs (id, input_path, output_dir, model, output_mode, options_json, status, created_at, finished_at)
@@ -412,7 +416,7 @@ impl AppDatabase {
         musical_scale: &str,
         duration_s: f64,
     ) -> AppResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE outputs SET bpm = ?1, musical_key = ?2, musical_scale = ?3, duration_s = ?4 WHERE folder_path = ?5",
             params![bpm, musical_key, musical_scale, duration_s, folder_path],
@@ -421,7 +425,7 @@ impl AppDatabase {
     }
 
     pub fn list_outputs(&self) -> AppResult<Vec<OutputFolderEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, folder_name, folder_path, source_filename, model, stems_json, bpm, musical_key, musical_scale, duration_s, created_at
              FROM outputs ORDER BY created_at DESC",
@@ -463,7 +467,7 @@ impl AppDatabase {
         let files_json = serde_json::to_string(files)?;
         let date = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let elapsed = format!("{:.1}s", elapsed_s);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO separation_history (id, files_json, model, device, status, date, elapsed, output_dir)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -473,7 +477,7 @@ impl AppDatabase {
     }
 
     pub fn list_separation_history(&self) -> AppResult<Vec<SeparationHistoryEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, files_json, model, device, status, date, elapsed, output_dir
              FROM separation_history ORDER BY date DESC",
@@ -500,7 +504,7 @@ impl AppDatabase {
     }
 
     pub fn clear_separation_history(&self) -> AppResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM separation_history", [])?;
         Ok(())
     }
@@ -515,7 +519,7 @@ impl AppDatabase {
     ) -> AppResult<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let date = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO download_history (id, title, url, output_path, format, quality, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -525,7 +529,7 @@ impl AppDatabase {
     }
 
     pub fn list_download_history(&self) -> AppResult<Vec<DownloadHistoryEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, title, url, output_path, format, quality, created_at
              FROM download_history ORDER BY created_at DESC",
@@ -549,13 +553,13 @@ impl AppDatabase {
     }
 
     pub fn clear_download_history(&self) -> AppResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM download_history", [])?;
         Ok(())
     }
 
     pub fn list_presets(&self) -> AppResult<Vec<(String, Value)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare("SELECT name, config_json FROM presets ORDER BY name ASC")?;
         let rows = stmt.query_map([], |row| {
             let name: String = row.get(0)?;
@@ -573,7 +577,7 @@ impl AppDatabase {
     pub fn save_preset(&self, name: &str, config: &Value) -> AppResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let cfg_str = serde_json::to_string(config)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO presets (name, config_json, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(name) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at",
@@ -583,7 +587,7 @@ impl AppDatabase {
     }
 
     pub fn delete_preset(&self, name: &str) -> AppResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM presets WHERE name = ?1", params![name])?;
         Ok(())
     }
