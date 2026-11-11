@@ -64,6 +64,15 @@ export const App: React.FC = () => {
     return () => window.removeEventListener("keydown", handler);
   }, [activeJobId, activeScreen, cancelJob, startSeparationBatch]);
 
+  // Unified timer-based auto-dismiss for system notification banner (prevents stacking)
+  useEffect(() => {
+    if (!systemBanner) return;
+    const timer = setTimeout(() => {
+      useSystemStore.setState({ systemBanner: null });
+    }, 4500);
+    return () => clearTimeout(timer);
+  }, [systemBanner]);
+
   return (
     <div
       dir={isRtl ? "rtl" : "ltr"}

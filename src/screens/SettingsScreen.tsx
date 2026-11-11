@@ -3,7 +3,6 @@ import {
   Activity,
   Archive,
   BatteryCharging,
-  Check,
   Cpu,
   Download,
   Eye,
@@ -43,7 +42,6 @@ export const SettingsScreen: React.FC = () => {
   const activeProfileMode = useSystemStore((s) => s.activeProfileMode);
   const calibrating = useSystemStore((s) => s.calibrating);
   const lastCalibrationResult = useSystemStore((s) => s.lastCalibrationResult);
-  const systemBanner = useSystemStore((s) => s.systemBanner);
   const hardwareProfile = useSystemStore((s) => s.hardwareProfile);
   const health = useSystemStore((s) => s.health);
 
@@ -80,16 +78,6 @@ export const SettingsScreen: React.FC = () => {
 
   return (
     <div className="space-y-5 pb-12" data-testid="settings-screen">
-      {systemBanner && (
-        <div
-          role="status"
-          className="rounded-xl bg-[#00D4AA]/15 border border-[#00D4AA]/40 px-4 py-3 text-xs text-[#00D4AA] flex items-center gap-2 font-mono"
-        >
-          <Check className="w-4 h-4 shrink-0" />
-          <span>{systemBanner}</span>
-        </div>
-      )}
-
       {/* Settings Search Bar + Basic/Advanced View Toggle + Import/Export/Reset */}
       <div className="rounded-xl bg-[#161822] border border-[#25293A] p-3.5 flex flex-wrap items-center justify-between gap-3">
         <div className="relative flex-1 min-w-[220px]">

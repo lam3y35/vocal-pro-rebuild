@@ -92,6 +92,23 @@ export const SeparationScreen: React.FC = () => {
     e.target.value = "";
   };
 
+  const handleDropFiles = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      const paths: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        const p = (f as any).path || f.name;
+        if (p) paths.push(p);
+      }
+      if (paths.length > 0) {
+        addFiles(paths);
+      }
+    }
+  };
+
   return (
     <div className="space-y-6 pb-12">
       {/* Multi-Job Tab Strip & Live Progress Bar */}
@@ -100,8 +117,31 @@ export const SeparationScreen: React.FC = () => {
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         {/* Left Column: Input Files + Waveform + URL Downloader + Live Logs */}
         <div className="xl:col-span-5 space-y-5">
-          {/* 1. Input Audio & Video File Queue Card */}
-          <div className="rounded-2xl bg-[#171A26] border border-[#252B3D] p-5 space-y-4 shadow-xl">
+          {/* 1. Input Audio & Video File Queue Card (Persistent Drag & Drop Zone) */}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragLeave={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                setIsDragging(false);
+              }
+            }}
+            onDrop={handleDropFiles}
+            className={`relative rounded-2xl bg-[#171A26] border p-5 space-y-4 shadow-xl transition-all ${
+              isDragging ? "border-[#00F0B5] ring-2 ring-[#00F0B5]/30" : "border-[#252B3D]"
+            }`}
+          >
+            {/* Drag Overlay when dragging files anywhere over the queue card */}
+            {isDragging && (
+              <div className="absolute inset-0 bg-[#171A26]/95 backdrop-blur-sm border-2 border-dashed border-[#00F0B5] rounded-2xl flex flex-col items-center justify-center z-30 pointer-events-none p-4 text-center animate-fadeIn">
+                <FolderOpen className="w-10 h-10 text-[#00F0B5] mb-2 animate-bounce" />
+                <p className="text-sm font-bold text-white">Drop audio or movie files here</p>
+                <p className="text-xs text-[#00F0B5] mt-1 font-mono">Will be added directly to the active queue</p>
+              </div>
+            )}
+
             <div className="flex items-center justify-between">
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
                 <FileAudio className="w-4 h-4 text-[#6C63FF]" />
@@ -163,7 +203,7 @@ export const SeparationScreen: React.FC = () => {
               </button>
             </div>
 
-            {/* Drag & Drop Zone */}
+            {/* Persistent Drag & Drop Zone */}
             {selectedFiles.length === 0 ? (
               <div
                 onClick={handleBrowse}
@@ -172,19 +212,7 @@ export const SeparationScreen: React.FC = () => {
                   setIsDragging(true);
                 }}
                 onDragLeave={() => setIsDragging(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setIsDragging(false);
-                  const files = e.dataTransfer.files;
-                  if (files && files.length > 0) {
-                    const paths: string[] = [];
-                    for (let i = 0; i < files.length; i++) {
-                      const p = (files[i] as any).path || files[i].name;
-                      if (p) paths.push(p);
-                    }
-                    if (paths.length > 0) addFiles(paths);
-                  }
-                }}
+                onDrop={handleDropFiles}
                 className={`border-2 border-dashed rounded-2xl p-7 text-center cursor-pointer transition-all ${
                   isDragging
                     ? "border-[#00F0B5] bg-[#00F0B5]/10 scale-[1.01]"
@@ -202,55 +230,71 @@ export const SeparationScreen: React.FC = () => {
                 </p>
               </div>
             ) : (
-              <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
-                {selectedFiles.map((filePath) => {
-                  const isVideo = /\.(mp4|mkv|avi|mov|webm|flv|wmv)$/i.test(filePath);
-                  const matchingJob = jobs.find((j) => j.input_path === filePath);
-                  return (
-                    <div
-                      key={filePath}
-                      className="rounded-xl bg-[#11131C] border border-[#252B3D] p-3 space-y-2 hover:border-[#6C63FF]/50 transition"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          {isVideo ? (
-                            <span className="p-1.5 rounded-lg bg-[#FFB020]/15 text-[#FFB020] border border-[#FFB020]/30 shrink-0">
-                              <FileVideo className="w-4 h-4" />
-                            </span>
-                          ) : (
-                            <span className="p-1.5 rounded-lg bg-[#00F0B5]/15 text-[#00F0B5] border border-[#00F0B5]/30 shrink-0">
-                              <FileAudio className="w-4 h-4" />
-                            </span>
-                          )}
-                          <div className="min-w-0">
-                            <span className="text-xs text-slate-100 font-semibold truncate block">
-                              {filePath.split(/[\\/]/).pop()}
-                            </span>
-                            <span className="text-[10px] text-slate-400 font-mono truncate block">
-                              {filePath}
-                            </span>
+              <div className="space-y-2.5">
+                <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                  {selectedFiles.map((filePath) => {
+                    const isVideo = /\.(mp4|mkv|avi|mov|webm|flv|wmv)$/i.test(filePath);
+                    const matchingJob = jobs.find((j) => j.input_path === filePath);
+                    return (
+                      <div
+                        key={filePath}
+                        className="rounded-xl bg-[#11131C] border border-[#252B3D] p-3 space-y-2 hover:border-[#6C63FF]/50 transition"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            {isVideo ? (
+                              <span className="p-1.5 rounded-lg bg-[#FFB020]/15 text-[#FFB020] border border-[#FFB020]/30 shrink-0">
+                                <FileVideo className="w-4 h-4" />
+                              </span>
+                            ) : (
+                              <span className="p-1.5 rounded-lg bg-[#00F0B5]/15 text-[#00F0B5] border border-[#00F0B5]/30 shrink-0">
+                                <FileAudio className="w-4 h-4" />
+                              </span>
+                            )}
+                            <div className="min-w-0">
+                              <span className="text-xs text-slate-100 font-semibold truncate block">
+                                {filePath.split(/[\\/]/).pop()}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-mono truncate block">
+                                {filePath}
+                              </span>
+                            </div>
                           </div>
+                          <button
+                            type="button"
+                            aria-label={`Remove ${filePath.split(/[\\/]/).pop()} from queue`}
+                            onClick={() => removeFile(filePath)}
+                            className="p-1 rounded-lg text-slate-400 hover:text-[#FF4D6D] hover:bg-[#252B3D] transition shrink-0"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          aria-label={`Remove ${filePath.split(/[\\/]/).pop()} from queue`}
-                          onClick={() => removeFile(filePath)}
-                          className="p-1 rounded-lg text-slate-400 hover:text-[#FF4D6D] hover:bg-[#252B3D] transition shrink-0"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {matchingJob && (
+                          <div className="w-full h-1.5 rounded-full bg-[#171A26] overflow-hidden">
+                            <div
+                              className="h-full bg-[#00F0B5] transition-all duration-200"
+                              style={{ width: `${matchingJob.percent}%` }}
+                            />
+                          </div>
+                        )}
                       </div>
-                      {matchingJob && (
-                        <div className="w-full h-1.5 rounded-full bg-[#171A26] overflow-hidden">
-                          <div
-                            className="h-full bg-[#00F0B5] transition-all duration-200"
-                            style={{ width: `${matchingJob.percent}%` }}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
+
+                {/* Compact Persistent Drop Zone when items are queued */}
+                <div
+                  onClick={handleBrowse}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDragging(true);
+                  }}
+                  onDrop={handleDropFiles}
+                  className="border-2 border-dashed border-[#252B3D] hover:border-[#00F0B5] hover:bg-[#00F0B5]/5 rounded-xl py-2.5 px-3 text-center cursor-pointer transition flex items-center justify-center gap-2 text-slate-400 hover:text-slate-200"
+                >
+                  <Plus className="w-3.5 h-3.5 text-[#00F0B5]" />
+                  <span className="text-xs font-semibold">Drop more movies or songs here, or click to browse</span>
+                </div>
               </div>
             )}
           </div>
