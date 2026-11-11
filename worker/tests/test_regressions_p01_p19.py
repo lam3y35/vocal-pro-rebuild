@@ -700,3 +700,60 @@ def test_real_htdemucs_pretrained_model_end_to_end_and_legacy_parity(
     null_db = 20.0 * np.log10(max(diff, 1e-12))
     assert null_db <= -100.0, f"Expected raw real htdemucs null-test <= -100 dBFS, got {null_db:.2f} dBFS"
     assert vocals_new.shape[0] == src_data.shape[0], "Output duration must match input sample count"
+
+
+def test_cinema_movie_export_targets_and_delete_original(tmp_path: Path, monkeypatch) -> None:
+    """[CINEMA][STORAGE] Tests video_only, both, audio_only, and delete_input_file on real video."""
+    monkeypatch.setenv("VOCALPRO_TEST_FAST_MODEL", "1")
+    engine.MODEL_CACHE.clear()
+
+    # 1. Test video_only: output folder contains ONLY clean video; temporary audio stems purged
+    in_mp4 = tmp_path / "cinema_test1.mp4"
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=160x120:d=1",
+        "-f", "lavfi", "-i", "sine=f=1000:d=1",
+        "-c:v", "libx264", "-c:a", "aac",
+        str(in_mp4)
+    ], capture_output=True, check=True)
+
+    out_dir = tmp_path / "out_vonly"
+    opts = {
+        "model": "htdemucs",
+        "output_mode": "vocals",
+        "output_format": "mp3",
+        "video_output_mode": "video_only",
+        "output_video": True,
+        "delete_input_file": True,
+    }
+    res = engine.run_separation_job("job-vonly", str(in_mp4), str(out_dir), opts, threading.Event(), lambda _: None)
+    files = [p.name for p in out_dir.rglob("*") if p.is_file()]
+    assert not in_mp4.exists(), "Original movie was deleted to save disk space"
+    assert any("clean" in f for f in files), "Clean movie exists"
+    assert not any(f.endswith(".mp3") or f.endswith(".wav") for f in files), "Intermediate audio stems purged"
+
+    # 2. Test both: preserves original movie, outputs clean movie + audio stems
+    in_mp4_2 = tmp_path / "cinema_test2.mp4"
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=160x120:d=1",
+        "-f", "lavfi", "-i", "sine=f=1000:d=1",
+        "-c:v", "libx264", "-c:a", "aac",
+        str(in_mp4_2)
+    ], capture_output=True, check=True)
+
+    out_dir_both = tmp_path / "out_both"
+    opts_both = {
+        "model": "htdemucs",
+        "output_mode": "vocals",
+        "output_format": "mp3",
+        "video_output_mode": "both",
+        "output_video": True,
+        "delete_input_file": False,
+    }
+    res_both = engine.run_separation_job("job-both", str(in_mp4_2), str(out_dir_both), opts_both, threading.Event(), lambda _: None)
+    files_both = [p.name for p in out_dir_both.rglob("*") if p.is_file()]
+    assert in_mp4_2.exists(), "Original movie preserved"
+    assert any("clean" in f for f in files_both), "Clean movie exists"
+    assert any(f.endswith(".mp3") for f in files_both), "Audio stem exists"
+
