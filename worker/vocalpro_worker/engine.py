@@ -156,10 +156,6 @@ def decode_audio_stereo_44k(input_path: Path, ffmpeg_bin: str = "ffmpeg") -> tup
             [
                 ffmpeg_bin,
                 "-y",
-                "-avoid_negative_ts",
-                "make_zero",
-                "-fflags",
-                "+genpts",
                 "-i",
                 str(input_path),
                 "-vn",
@@ -171,6 +167,10 @@ def decode_audio_stereo_44k(input_path: Path, ffmpeg_bin: str = "ffmpeg") -> tup
                 "44100",
                 "-ac",
                 "2",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-fflags",
+                "+genpts",
                 str(tmp_wav),
             ],
             capture_output=True,
@@ -247,8 +247,15 @@ def write_encoded_stem(
                     text=True,
                 )
                 if proc.returncode != 0:
+                    err_msg = (proc.stderr or "").lower()
+                    if "no space left on device" in err_msg or "enospc" in err_msg:
+                        err_code = "DISK_FULL"
+                    elif "permission denied" in err_msg:
+                        err_code = "OUTPUT_NOT_WRITABLE"
+                    else:
+                        err_code = "INTERNAL"
                     raise WorkerEngineError(
-                        "INTERNAL",
+                        err_code,
                         f"AAC encoding failed for {target_path.name}",
                         detail=proc.stderr[-400:] if proc.stderr else None,
                     )
@@ -277,8 +284,15 @@ def write_encoded_stem(
                     text=True,
                 )
                 if proc.returncode != 0:
+                    err_msg = (proc.stderr or "").lower()
+                    if "no space left on device" in err_msg or "enospc" in err_msg:
+                        err_code = "DISK_FULL"
+                    elif "permission denied" in err_msg:
+                        err_code = "OUTPUT_NOT_WRITABLE"
+                    else:
+                        err_code = "INTERNAL"
                     raise WorkerEngineError(
-                        "INTERNAL",
+                        err_code,
                         f"MP3 encoding failed for {target_path.name}",
                         detail=proc.stderr[-400:] if proc.stderr else None,
                     )
@@ -291,19 +305,29 @@ def write_encoded_stem(
     except WorkerEngineError:
         raise
     except OSError as exc:
+        err_msg = str(exc).lower()
+        if "no space left on device" in err_msg or getattr(exc, "errno", None) == 28:
+            err_code = "DISK_FULL"
+        else:
+            err_code = "OUTPUT_NOT_WRITABLE"
         raise WorkerEngineError(
-            "OUTPUT_NOT_WRITABLE",
+            err_code,
             f"Failed to write output stem {target_path.name}: {exc}",
             detail=str(exc),
         ) from exc
     except RuntimeError as exc:
-        if "system error" in str(exc).lower() or "permission" in str(exc).lower():
-            raise WorkerEngineError(
-                "OUTPUT_NOT_WRITABLE",
-                f"Permission denied writing {target_path.name}: {exc}",
-                detail=str(exc),
-            ) from exc
-        raise
+        err_msg = str(exc).lower()
+        if "no space left on device" in err_msg or "enospc" in err_msg:
+            err_code = "DISK_FULL"
+        elif "system error" in err_msg or "permission" in err_msg:
+            err_code = "OUTPUT_NOT_WRITABLE"
+        else:
+            err_code = "INTERNAL"
+        raise WorkerEngineError(
+            err_code,
+            f"Permission denied writing {target_path.name}: {exc}",
+            detail=str(exc),
+        ) from exc
 
 
 def normalize_duration_array(audio_ch: np.ndarray, target_samples: int, sr: int = 44100) -> np.ndarray:
@@ -816,7 +840,7 @@ def run_separation_job(
 
     # Phase 5: Write output stems once (fixes P-05, P-07, P-17)
     send_progress("writing", 95.0, message="Writing output stems...")
-    output_format = str(opts.get("output_format") or "wav").lower().lstrip(".")
+    output_format = str(opts.get("output_format") or "mp3").lower().lstrip(".")
     audio_bitrate = str(opts.get("audio_bitrate") or "320k")
     wav_bit_depth = str(opts.get("wav_bit_depth") or "PCM_16")
     output_mode = str(opts.get("output_mode") or "vocals").lower()
@@ -927,17 +951,47 @@ def run_separation_job(
             elif "karaoke_path" in locals() and karaoke_path.exists():
                 mux_audio_path = karaoke_path
 
+        # Probe video start time offset to guarantee microsecond lip-sync
+        video_start_offset = 0.0
+        try:
+            ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
+            probe_cmd = [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=start_time",
+                "-of",
+                "json",
+                str(input_path),
+            ]
+            p_res = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if p_res.returncode == 0:
+                p_json = json.loads(p_res.stdout)
+                streams = p_json.get("streams", [])
+                if streams and streams[0].get("start_time"):
+                    st = float(streams[0]["start_time"])
+                    if st > 0.005:
+                        video_start_offset = st
+        except Exception:
+            pass
+
         # Sample-accurate cinema video remuxing:
-        # -af "aresample=async=1:first_pts=0": Locks audio stream 1:a:0 exactly to frame 0 PTS (removes timing drift/stutter)
-        # -ar 48000: Broadcast standard audio sampling rate
-        # -avoid_negative_ts make_zero -fflags +genpts: Resets container timestamps to exact 0.0s
-        # -map 0:s? -c:s copy: Preserves movie subtitles whenever possible
-        # Removed -shortest so ending movie dialogue/credits are not truncated prematurely.
+        # -af "aresample=async=1:first_pts=0,apad": Locks audio to frame 0 PTS and pads missing tail samples with silence
+        # -shortest: Terminates stream at exact video duration so player never freezes at final video frame
+        # -c:v copy: 100% lossless video stream passthrough (zero re-encoding, zero storage overhead)
+        # -c:a aac -b:a 320k: Studio master broadcast audio quality in compact footprint
         cmd = [
             ffmpeg_bin,
             "-y",
             "-i",
             str(input_path),
+        ]
+        if video_start_offset > 0.005:
+            cmd.extend(["-itsoffset", f"{video_start_offset:.4f}"])
+        cmd.extend([
             "-i",
             str(mux_audio_path),
             "-map",
@@ -955,7 +1009,8 @@ def run_separation_job(
             "-ar",
             "48000",
             "-af",
-            "aresample=async=1:first_pts=0",
+            "aresample=async=1:first_pts=0,apad",
+            "-shortest",
             "-c:s",
             "copy",
             "-map_chapters",
@@ -964,7 +1019,7 @@ def run_separation_job(
             "make_zero",
             "-fflags",
             "+genpts",
-        ]
+        ])
         if clean_ext == ".mp4" and bool(opts.get("ffmpeg_faststart", True)):
             cmd.extend(["-movflags", "+faststart"])
         cmd.append(str(clean_video_path))
@@ -977,6 +1032,10 @@ def run_separation_job(
                 "-y",
                 "-i",
                 str(input_path),
+            ]
+            if video_start_offset > 0.005:
+                cmd_fallback.extend(["-itsoffset", f"{video_start_offset:.4f}"])
+            cmd_fallback.extend([
                 "-i",
                 str(mux_audio_path),
                 "-map",
@@ -992,14 +1051,15 @@ def run_separation_job(
                 "-ar",
                 "48000",
                 "-af",
-                "aresample=async=1:first_pts=0",
+                "aresample=async=1:first_pts=0,apad",
+                "-shortest",
                 "-map_chapters",
                 "0",
                 "-avoid_negative_ts",
                 "make_zero",
                 "-fflags",
                 "+genpts",
-            ]
+            ])
             if clean_ext == ".mp4" and bool(opts.get("ffmpeg_faststart", True)):
                 cmd_fallback.extend(["-movflags", "+faststart"])
             cmd_fallback.append(str(clean_video_path))

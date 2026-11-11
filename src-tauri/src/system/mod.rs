@@ -277,10 +277,8 @@ pub fn classify_hardware_spec(spec: HardwareSpecInput) -> HardwareProfile {
                     .to_string(),
             );
             "eco"
-        } else if matches!(device_tier, "ultra_gpu" | "high_gpu") {
-            "max_quality"
         } else {
-            "balanced"
+            "max_quality"
         }
     } else {
         req_mode
@@ -341,7 +339,7 @@ pub fn classify_hardware_spec(spec: HardwareSpecInput) -> HardwareProfile {
             preset,
             false, // Addendum #2: fp16 is strictly opt-in
             true,
-            false,
+            device_tier == "low_resource",
             format!(
                 "Max Quality: preserves legacy reference quality (shifts=1, overlap=0.25, segment=7.8s, fp32) on {} ({} worker(s), {} threads/worker)",
                 base_device.to_uppercase(),
@@ -745,10 +743,24 @@ pub fn extract_query_filename(url: &str) -> Option<String> {
         for pair in query.split('&') {
             if let Some((key, val)) = pair.split_once('=') {
                 let key_low = key.to_lowercase();
-                if matches!(key_low.as_str(), "filename" | "file" | "title" | "name" | "track" | "movie") {
+                if matches!(
+                    key_low.as_str(),
+                    "filename" | "file" | "title" | "name" | "track" | "movie" | "film" | "video" | "media" | "song" | "q" | "v" | "item"
+                ) {
                     let decoded = percent_decode_url(val);
                     let trimmed = decoded.trim().to_string();
-                    if !trimmed.is_empty() {
+                    let stem = Path::new(&trimmed)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&trimmed)
+                        .to_lowercase();
+                    if !trimmed.is_empty()
+                        && !matches!(
+                            stem.as_str(),
+                            "stream" | "download" | "audio" | "video" | "get" | "watch" | "media" | "play" | "file"
+                        )
+                        && !stem.chars().all(|c| c.is_ascii_digit())
+                    {
                         return Some(trimmed);
                     }
                 }
@@ -760,12 +772,63 @@ pub fn extract_query_filename(url: &str) -> Option<String> {
 
 pub fn extract_path_filename(url: &str) -> Option<String> {
     let path_part = url.split('?').next().unwrap_or(url);
-    if let Some(segment) = path_part.rsplit('/').next() {
+    let segments: Vec<&str> = path_part.split('/').collect();
+    // Scan backward to find the first non-generic segment
+    for segment in segments.into_iter().rev() {
         let decoded = percent_decode_url(segment);
         let trimmed = decoded.trim().to_string();
-        let low = trimmed.to_lowercase();
-        if !trimmed.is_empty() && !matches!(low.as_str(), "stream" | "download" | "audio" | "video" | "get" | "watch" | "media" | "play" | "file") {
+        let stem = Path::new(&trimmed)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&trimmed)
+            .to_lowercase();
+        if !trimmed.is_empty()
+            && !matches!(
+                stem.as_str(),
+                "stream" | "download" | "audio" | "video" | "get" | "watch" | "media" | "play" | "file" | "master" | "index" | "playlist" | "manifest" | "hls" | "dash" | "output"
+            )
+            && !stem.chars().all(|c| c.is_ascii_digit())
+        {
             return Some(trimmed);
+        }
+    }
+    None
+}
+
+pub fn fetch_webpage_title(url: &str) -> Option<String> {
+    let output = Command::new("curl")
+        .args(["-L", "-s", "--max-time", "4", "-r", "0-16384", url])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        if let Some(start_tag) = text.to_lowercase().find("<title") {
+            if let Some(tag_close) = text[start_tag..].find('>') {
+                let after_tag = &text[start_tag + tag_close + 1..];
+                if let Some(end_tag) = after_tag.to_lowercase().find("</title>") {
+                    let title = &after_tag[..end_tag];
+                    let clean = title
+                        .replace("&amp;", "&")
+                        .replace("&quot;", "\"")
+                        .replace("&#39;", "'")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .trim()
+                        .to_string();
+                    let clean = clean
+                        .split(" - YouTube")
+                        .next()
+                        .unwrap_or(&clean)
+                        .split(" | ")
+                        .next()
+                        .unwrap_or(&clean)
+                        .trim()
+                        .to_string();
+                    if !clean.is_empty() && clean.len() < 120 {
+                        return Some(clean);
+                    }
+                }
+            }
         }
     }
     None
@@ -843,6 +906,7 @@ pub fn download_media_url(
             .map(|s| s.to_string())
             .or_else(|| extract_query_filename(url))
             .or_else(|| extract_path_filename(url))
+            .or_else(|| fetch_webpage_title(url))
             .unwrap_or_else(|| "downloaded_media.mp3".to_string());
 
         let mut sanitized = sanitize_filename(&fallback_name);
@@ -888,6 +952,8 @@ pub fn download_media_url(
             .or_else(|| extract_query_filename(&redirected_url))
             .or_else(|| extract_path_filename(&redirected_url))
             .or_else(|| extract_path_filename(url))
+            .or_else(|| fetch_webpage_title(&redirected_url))
+            .or_else(|| fetch_webpage_title(url))
     } else {
         None
     };

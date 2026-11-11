@@ -81,13 +81,32 @@ def detect_vocal_activity(
     return np.clip(mask, 0.0, 1.0)
 
 
+def apply_boundary_smoothing(audio: np.ndarray, sr: int = 44100, fade_duration_s: float = 0.05) -> np.ndarray:
+    """Ensure seamless start and end transitions with smooth raised-cosine micro-ramps."""
+    if audio.size == 0:
+        return audio
+    fade_len = min(int(fade_duration_s * sr), audio.shape[-1] // 4)
+    if fade_len <= 1:
+        return audio
+    out = audio.copy()
+    ramp_in = 0.5 * (1.0 - np.cos(np.linspace(0, np.pi, fade_len, dtype=np.float32)))
+    ramp_out = 0.5 * (1.0 + np.cos(np.linspace(0, np.pi, fade_len, dtype=np.float32)))
+    if out.ndim == 1:
+        out[:fade_len] *= ramp_in
+        out[-fade_len:] *= ramp_out
+    else:
+        out[:, :fade_len] *= ramp_in
+        out[:, -fade_len:] *= ramp_out
+    return out
+
+
 def apply_vocal_gate(
     audio: np.ndarray,
     sr: int = 44100,
     threshold_db: float = -55.0,
     gate_floor_db: float = -60.0,
-    attack_ms: float = 30.0,
-    release_ms: float = 200.0,
+    attack_ms: float = 40.0,
+    release_ms: float = 350.0,
     min_vocal_duration: float = 0.08,
     vocal_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
