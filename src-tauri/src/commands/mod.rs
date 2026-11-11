@@ -59,7 +59,10 @@ impl AppContext {
         let default_outputs_dir = app_data_dir.join("output_vocals");
         let _ = db.migrate_legacy(&app_data_dir, &extra_cfgs, &[default_outputs_dir]);
 
-        let worker = WorkerSupervisor::new(python_bin, worker_pythonpath, fast_test_model);
+        let models_dir = std::env::var("VOCALPRO_MODELS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| app_data_dir.join("models"));
+        let worker = WorkerSupervisor::new(python_bin, worker_pythonpath, fast_test_model, models_dir);
         if let Ok(resumable) = db.load_resumable_jobs() {
             if !resumable.is_empty() {
                 worker.restore_jobs(resumable);
@@ -76,6 +79,10 @@ impl AppContext {
 
     pub fn start_worker(&self) -> AppResult<WorkerHealth> {
         self.worker.start()
+    }
+
+    pub fn models_dir(&self) -> &Path {
+        self.worker.models_dir()
     }
 
     pub fn worker_health(&self) -> WorkerHealth {
@@ -646,20 +653,91 @@ impl AppContext {
         options: JobOptions,
     ) -> AppResult<Vec<JobRecord>> {
         let mut handles = Vec::with_capacity(inputs.len());
-        for input_path in inputs {
+        for input_path in &inputs {
             let ctx = self.clone();
+            let inp = input_path.clone();
             let out = output_dir.clone();
             let opts = options.clone();
             handles.push(tokio::spawn(async move {
-                ctx.submit_separation_job(input_path, out, opts).await
+                ctx.submit_separation_job(inp, out, opts).await
             }));
         }
         let mut records = Vec::with_capacity(handles.len());
-        for h in handles {
-            let res = h
-                .await
-                .map_err(|e| AppError::System(format!("Batch task join error: {}", e)))??;
-            records.push(res);
+        for (idx, h) in handles.into_iter().enumerate() {
+            let input_file = inputs.get(idx).cloned().unwrap_or_default();
+            match h.await {
+                Ok(Ok(rec)) => records.push(rec),
+                Ok(Err(err)) => {
+                    eprintln!("[BATCH_WARN] Job for file '{}' failed: {}", input_file, err);
+                    let existing_rec = self
+                        .worker
+                        .list_jobs()
+                        .into_iter()
+                        .rev()
+                        .find(|j| j.input_path == input_file && j.status == crate::worker::job_queue::JobStatus::Failed);
+                    if let Some(rec) = existing_rec {
+                        records.push(rec);
+                    } else {
+                        let (code, msg) = match &err {
+                            AppError::Worker { code, message, .. } => (code.clone(), message.clone()),
+                            _ => ("BATCH_ERROR".to_string(), err.to_string()),
+                        };
+                        let rec = JobRecord {
+                            job_id: uuid::Uuid::new_v4().to_string(),
+                            input_path: input_file,
+                            output_dir: output_dir.clone(),
+                            options: options.clone(),
+                            status: crate::worker::job_queue::JobStatus::Failed,
+                            phase: "failed".to_string(),
+                            percent: 0.0,
+                            segment_index: 0,
+                            segment_total: 1,
+                            sub_model_index: 0,
+                            sub_model_total: 1,
+                            eta_s: None,
+                            message: msg.clone(),
+                            stems: Vec::new(),
+                            comparison_samples: Vec::new(),
+                            error_code: Some(code),
+                            error_message: Some(msg),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            elapsed_s: None,
+                            worker_slot: None,
+                            priority: "normal".to_string(),
+                        };
+                        let _ = self.db.upsert_job_record(&rec);
+                        records.push(rec);
+                    }
+                }
+                Err(join_err) => {
+                    eprintln!("[BATCH_WARN] Task join error for file '{}': {}", input_file, join_err);
+                    let rec = JobRecord {
+                        job_id: uuid::Uuid::new_v4().to_string(),
+                        input_path: input_file,
+                        output_dir: output_dir.clone(),
+                        options: options.clone(),
+                        status: crate::worker::job_queue::JobStatus::Failed,
+                        phase: "failed".to_string(),
+                        percent: 0.0,
+                        segment_index: 0,
+                        segment_total: 1,
+                        sub_model_index: 0,
+                        sub_model_total: 1,
+                        eta_s: None,
+                        message: join_err.to_string(),
+                        stems: Vec::new(),
+                        comparison_samples: Vec::new(),
+                        error_code: Some("JOIN_ERROR".to_string()),
+                        error_message: Some(join_err.to_string()),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        elapsed_s: None,
+                        worker_slot: None,
+                        priority: "normal".to_string(),
+                    };
+                    let _ = self.db.upsert_job_record(&rec);
+                    records.push(rec);
+                }
+            }
         }
         Ok(records)
     }

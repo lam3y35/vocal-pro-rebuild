@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import gc
+import json
 import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -74,6 +76,10 @@ def resolve_ffmpeg(custom_path: str = "") -> str:
     candidates = [
         exe_dir / "ffmpeg.exe",
         exe_dir / "ffmpeg",
+        exe_dir.parent / "ffmpeg.exe",
+        exe_dir.parent / "ffmpeg",
+        exe_dir.parent.parent / "ffmpeg.exe",
+        exe_dir.parent.parent / "ffmpeg",
         exe_dir.parent / "resources" / "ffmpeg.exe",
         exe_dir.parent / "resources" / "ffmpeg",
         cwd / "resources" / "ffmpeg.exe",
@@ -113,6 +119,9 @@ def load_demucs_model(model_name: str, device: torch.device) -> Any:
         if cache_key in MODEL_CACHE:
             return MODEL_CACHE[cache_key]
 
+    if model_name not in MODEL_POOL:
+        raise WorkerEngineError("MODEL_MISSING", f"Model '{model_name}' not found in registry")
+
     if os.environ.get("VOCALPRO_TEST_FAST_MODEL") == "1":
         sources = (
             ["drums", "bass", "other", "vocals", "guitar", "piano"]
@@ -141,6 +150,13 @@ def load_demucs_model(model_name: str, device: torch.device) -> Any:
         )
 
     try:
+        models_dir = os.environ.get("VOCALPRO_MODELS_DIR")
+        if models_dir and Path(models_dir).is_dir():
+            p = Path(models_dir)
+            if (p / "checkpoints").is_dir():
+                torch.hub.set_dir(str(p))
+            else:
+                torch.hub.set_dir(str(p.parent if p.name == "checkpoints" else p))
         model = get_model(model_name)
         model.to(device)
         model.eval()
@@ -518,6 +534,13 @@ def _infer_single_tensor(
     )
     mix_tensor = torch.from_numpy(mix_ch).unsqueeze(0).to(device)
     try:
+        if os.environ.get("VOCALPRO_SIMULATE_CUDA_OOM") == "1":
+            os.environ["VOCALPRO_SIMULATE_CUDA_OOM"] = "0"
+            raise WorkerEngineError(
+                "OOM_CUDA",
+                "CUDA GPU out of memory during inference",
+                detail="CUDA out of memory (simulated)",
+            )
         with torch.inference_mode():
             if use_fp16 and hasattr(torch, "autocast"):
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
@@ -688,7 +711,7 @@ def run_separation_job(
         audio_arr: np.ndarray,
         prog_cb: Callable[[int, int, int, int, float], None],
     ) -> dict[str, np.ndarray]:
-        nonlocal device
+        nonlocal device, primary_model, secondary_model, shifts, segment_s
         try:
             return _infer_single_tensor(
                 mdl,
@@ -708,10 +731,18 @@ def run_separation_job(
                     12.0,
                     message="VRAM limit reached — automatically falling back to CPU safe segment...",
                 )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 device = torch.device("cpu")
-                cpu_mdl = load_demucs_model("htdemucs_ft" if ensemble_mode else model_name, device)
+                is_secondary = (secondary_model is not None and mdl is secondary_model)
+                primary_model = load_demucs_model("htdemucs_ft" if ensemble_mode else model_name, device)
+                if secondary_model is not None:
+                    secondary_model = load_demucs_model("mdx_extra", device)
+                current_model = secondary_model if is_secondary else primary_model
+                shifts = 0
+                segment_s = 4.0
                 return _infer_single_tensor(
-                    cpu_mdl,
+                    current_model,
                     audio_arr,
                     device,
                     0,
@@ -1138,6 +1169,7 @@ def run_separation_job(
 
     send_progress("writing", 100.0, 1, 1, 1, 1, 0.0, "Separation complete")
     elapsed_s = round(time.perf_counter() - t_job_start, 3)
+    gc.collect()
 
     return {
         "job_id": job_id,

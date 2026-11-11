@@ -6,11 +6,14 @@ import hashlib
 import json
 import os
 import platform
-import resource
 import shutil
 import subprocess
 import tempfile
 import time
+try:
+    import resource
+except ImportError:
+    resource = None
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -623,6 +626,7 @@ def detect_hardware_profile(
 
 def get_process_rss_mb() -> int:
     """Return current process Resident Set Size (RSS) in MiB."""
+    # 1. Linux /proc filesystem
     try:
         if Path("/proc/self/status").exists():
             for line in Path("/proc/self/status").read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -631,13 +635,49 @@ def get_process_rss_mb() -> int:
                     return kb // 1024
     except Exception:
         pass
-    try:
-        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        if platform.system().lower() == "darwin":
-            return int(usage // (1024 * 1024))
-        return int(usage // 1024)
-    except Exception:
-        return 256
+
+    # 2. POSIX / macOS resource module
+    if resource is not None:
+        try:
+            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if platform.system().lower() == "darwin":
+                return int(usage // (1024 * 1024))
+            return int(usage // 1024)
+        except Exception:
+            pass
+
+    # 3. Windows Win32 API via standard ctypes
+    if platform.system().lower().startswith("win"):
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(
+                handle, ctypes.byref(counters), counters.cb
+            ):
+                return int(counters.WorkingSetSize // (1024 * 1024))
+        except Exception:
+            pass
+
+    # 4. Default safe fallback
+    return 256
 
 
 def _probe_worker(threads: int, seconds: float, out_q: Any) -> None:

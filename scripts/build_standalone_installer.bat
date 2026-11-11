@@ -1,4 +1,7 @@
 @echo off
+chcp 65001 >nul 2>&1
+set "ROOT_DIR=%~dp0.."
+cd /d "%ROOT_DIR%"
 setlocal enabledelayedexpansion
 
 echo ==============================================================================
@@ -7,12 +10,14 @@ echo Builds single Setup EXE containing Rust Binary + Python AI + Models
 echo ==============================================================================
 echo.
 
-set "ROOT_DIR=%~dp0.."
-cd /d "%ROOT_DIR%"
-
 :: 1. Build React 19 Frontend
 echo [1/5] Building React 19 production frontend...
-call pnpm run build
+where pnpm >nul 2>&1
+if %ERRORLEVEL% equ 0 (
+    call pnpm run build
+) else (
+    call npm run build
+)
 if %ERRORLEVEL% neq 0 (
     echo [ERROR] Frontend build failed.
     exit /b 1
@@ -33,10 +38,10 @@ mkdir dist\bundle 2>nul
 mkdir dist\bundle\models 2>nul
 mkdir dist\installer 2>nul
 
-copy src-tauri\target\release\vocalpro.exe dist\bundle\vocalpro.exe
+copy /Y src-tauri\target\release\vocalpro.exe dist\bundle\vocalpro.exe
 
-:: 4. Bundle Portable Python AI Engine
-echo [4/5] Bundling Python AI engine & default models...
+:: 4. Bundle Portable Python AI Engine, FFmpeg & Default Models
+echo [4/5] Bundling Python AI engine, FFmpeg & default models...
 if not exist "%APPDATA%\VocalPro\engine\venv\Scripts\python.exe" (
     echo [*] Initializing engine via setup_windows_engine.bat...
     call scripts\setup_windows_engine.bat
@@ -45,9 +50,35 @@ if not exist "%APPDATA%\VocalPro\engine\venv\Scripts\python.exe" (
 mkdir dist\bundle\engine 2>nul
 xcopy /E /I /Q /Y "%APPDATA%\VocalPro\engine\venv" "dist\bundle\engine"
 
-:: Copy cached model weights if present
-if exist "%USERPROFILE%\.cache\torch\hub\checkpoints" (
-    xcopy /E /I /Q /Y "%USERPROFILE%\.cache\torch\hub\checkpoints" "dist\bundle\models"
+:: Relocatability Fix: Sanitize pyvenv.cfg for relocatable execution
+if exist "dist\bundle\engine\pyvenv.cfg" (
+    echo [*] Sanitizing pyvenv.cfg for relocatable execution...
+    (
+        echo home = .
+        echo include-system-site-packages = false
+        echo version = 3.11.9
+    ) > "dist\bundle\engine\pyvenv.cfg"
+)
+
+:: Ensure static FFmpeg is staged
+if not exist "dist\bundle\ffmpeg.exe" (
+    if exist "%APPDATA%\VocalPro\engine\ffmpeg.exe" (
+        copy /Y "%APPDATA%\VocalPro\engine\ffmpeg.exe" "dist\bundle\ffmpeg.exe"
+    ) else (
+        where ffmpeg >nul 2>&1
+        if !ERRORLEVEL! equ 0 (
+            for /f "delims=" %%F in ('where ffmpeg') do (
+                if not exist "dist\bundle\ffmpeg.exe" copy /Y "%%F" "dist\bundle\ffmpeg.exe"
+            )
+        )
+    )
+)
+
+:: Ensure offline model weights are staged
+if not exist "dist\bundle\models\*.th" (
+    echo [*] Pre-caching default Demucs model weights...
+    set "PYTHONPATH=%ROOT_DIR%\worker"
+    "%APPDATA%\VocalPro\engine\venv\Scripts\python.exe" -m vocalpro_worker.model_installer htdemucs --target dist\bundle\models
 )
 
 :: 5. Compile Inno Setup Single Installer

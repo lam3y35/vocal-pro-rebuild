@@ -716,3 +716,290 @@ fn test_download_media_url_rejects_non_http_and_html_guard() {
     .unwrap();
     assert!(html_file.exists());
 }
+
+#[tokio::test]
+async fn test_batch_separation_fault_isolation_partial_failure() {
+    let tmp = tempdir().unwrap();
+    let app_data = tmp.path().join("VocalProBatchFault");
+    let ctx = AppContext::new(app_data, python_bin(), worker_dir(), true).unwrap();
+    ctx.start_worker().unwrap();
+
+    let valid_file = ensure_ref_wav("track_01_pop_stereo_44k.wav");
+    let corrupt_file = tmp.path().join("non_existent_corrupted_file.wav");
+    let out_dir = tmp.path().join("out_fault_batch");
+
+    let opts = JobOptions {
+        model: "htdemucs".to_string(),
+        shifts: 0,
+        ..JobOptions::default()
+    };
+
+    // Dispatch batch containing 1 valid file and 1 invalid file
+    let results = ctx
+        .submit_batch_separations(
+            vec![
+                valid_file.to_string_lossy().to_string(),
+                corrupt_file.to_string_lossy().to_string(),
+            ],
+            out_dir.to_string_lossy().to_string(),
+            opts,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2, "Batch must return records for all inputs");
+
+    let valid_rec = results
+        .iter()
+        .find(|r| r.input_path == valid_file.to_string_lossy())
+        .expect("Valid file record must be present");
+    let corrupt_rec = results
+        .iter()
+        .find(|r| r.input_path == corrupt_file.to_string_lossy())
+        .expect("Corrupt file record must be present");
+
+    assert_eq!(
+        valid_rec.status,
+        JobStatus::Done,
+        "Valid job must succeed despite peer failure"
+    );
+    assert!(
+        !valid_rec.stems.is_empty(),
+        "Valid job must produce stem outputs"
+    );
+
+    assert_eq!(
+        corrupt_rec.status,
+        JobStatus::Failed,
+        "Corrupted/missing file job must be marked Failed"
+    );
+    assert!(
+        corrupt_rec.error_code.is_some(),
+        "Failed job must have error_code populated"
+    );
+    assert!(
+        corrupt_rec.error_message.is_some(),
+        "Failed job must have error_message populated"
+    );
+
+    let history = ctx.list_separation_history().unwrap();
+    assert!(
+        !history.is_empty(),
+        "Separation history must record successful jobs"
+    );
+}
+
+#[test]
+fn test_stem_solo_mix_export_isolates_soloed_stem() {
+    let tmp = tempdir().unwrap();
+    let song_folder = tmp.path().join("TestSoloSong");
+    std::fs::create_dir_all(&song_folder).unwrap();
+
+    let sr = 44100_u32;
+    let frames = 44100 * 2; // 2 seconds
+    let channels = 2_u16;
+
+    // Stem 1: Vocals (sine wave 440 Hz)
+    let mut vocal_samples = vec![0.0_f32; frames * 2];
+    for i in 0..frames {
+        let t = (i as f32) / (sr as f32);
+        let s = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.8;
+        vocal_samples[i * 2] = s;
+        vocal_samples[i * 2 + 1] = s;
+    }
+    let vocal_path = song_folder.join("TestSoloSong_vocals.wav");
+    write_pcm16_wav(&vocal_samples, sr, channels, &vocal_path).unwrap();
+
+    // Stem 2: Drums (sine wave 100 Hz)
+    let mut drum_samples = vec![0.0_f32; frames * 2];
+    for i in 0..frames {
+        let t = (i as f32) / (sr as f32);
+        let s = (2.0 * std::f32::consts::PI * 100.0 * t).sin() * 0.8;
+        drum_samples[i * 2] = s;
+        drum_samples[i * 2 + 1] = s;
+    }
+    let drum_path = song_folder.join("TestSoloSong_drums.wav");
+    write_pcm16_wav(&drum_samples, sr, channels, &drum_path).unwrap();
+
+    // Stem 3: Bass
+    let mut bass_samples = vec![0.0_f32; frames * 2];
+    for i in 0..frames {
+        let t = (i as f32) / (sr as f32);
+        let s = (2.0 * std::f32::consts::PI * 60.0 * t).sin() * 0.8;
+        bass_samples[i * 2] = s;
+        bass_samples[i * 2 + 1] = s;
+    }
+    let bass_path = song_folder.join("TestSoloSong_bass.wav");
+    write_pcm16_wav(&bass_samples, sr, channels, &bass_path).unwrap();
+
+    // Stem 4: Other
+    let mut other_samples = vec![0.0_f32; frames * 2];
+    for i in 0..frames {
+        let t = (i as f32) / (sr as f32);
+        let s = (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * 0.8;
+        other_samples[i * 2] = s;
+        other_samples[i * 2 + 1] = s;
+    }
+    let other_path = song_folder.join("TestSoloSong_other.wav");
+    write_pcm16_wav(&other_samples, sr, channels, &other_path).unwrap();
+
+    let stems = discover_stems_in_folder(&song_folder).unwrap();
+    assert_eq!(stems.len(), 4);
+
+    let mixer = LiveStemMixer::load_stems(stems, song_folder.clone()).unwrap();
+
+    // 1. Initial state: no stem soloed
+    let snap_init = mixer.snapshot();
+    let vols_init = LiveStemMixer::compute_effective_volumes(&snap_init.stems);
+    assert_eq!(vols_init.get("vocals").copied().unwrap(), 1.0);
+    assert_eq!(vols_init.get("drums").copied().unwrap(), 1.0);
+    assert_eq!(vols_init.get("bass").copied().unwrap(), 1.0);
+    assert_eq!(vols_init.get("other").copied().unwrap(), 1.0);
+
+    // 2. Solo "vocals"
+    assert!(mixer.set_stem_solo("vocals", true));
+    let snap_solo = mixer.snapshot();
+    let vols_solo = LiveStemMixer::compute_effective_volumes(&snap_solo.stems);
+    assert_eq!(
+        vols_solo.get("vocals").copied().unwrap(),
+        1.0,
+        "Soloed stem must have active gain"
+    );
+    assert_eq!(
+        vols_solo.get("drums").copied().unwrap(),
+        0.0,
+        "Non-soloed drums must have 0.0 volume"
+    );
+    assert_eq!(
+        vols_solo.get("bass").copied().unwrap(),
+        0.0,
+        "Non-soloed bass must have 0.0 volume"
+    );
+    assert_eq!(
+        vols_solo.get("other").copied().unwrap(),
+        0.0,
+        "Non-soloed other must have 0.0 volume"
+    );
+
+    // 3. Export mix with effective solo volumes and verify only vocals audio is present
+    let mix_file =
+        vocalpro_lib::audio::export::export_stem_mix(&song_folder, &vols_solo, "wav", "320k")
+            .unwrap();
+    assert!(mix_file.exists());
+
+    let decoded_mix = vocalpro_lib::audio::decode::decode_audio_file(&mix_file).unwrap();
+    assert_eq!(decoded_mix.frames, frames);
+
+    // Verify exported mix matches vocals audio (within numerical precision)
+    let max_diff = decoded_mix
+        .samples_interleaved
+        .iter()
+        .zip(vocal_samples.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, |m, d| m.max(d));
+    assert!(
+        max_diff < 0.01,
+        "Solo mix export should strictly match vocals without drum/bass bleed: max_diff={}",
+        max_diff
+    );
+
+    // 4. Test separate custom export: only soloed stems (vol > 0) are exported
+    let separate_files = vocalpro_lib::audio::export::export_separate_custom_stems(
+        &song_folder,
+        &vols_solo,
+        "wav",
+        "320k",
+    )
+    .unwrap();
+    assert_eq!(
+        separate_files.len(),
+        1,
+        "Only soloed stem should be exported in separate stems mode"
+    );
+    assert!(separate_files[0]
+        .to_string_lossy()
+        .contains("vocals_custom.wav"));
+}
+
+#[tokio::test]
+async fn test_worker_spawn_environment_and_offline_models_propagation() {
+    let tmp = tempdir().unwrap();
+    let custom_models = tmp.path().join("OfflineModelsDir");
+    std::fs::create_dir_all(&custom_models).unwrap();
+
+    // Set VOCALPRO_MODELS_DIR override
+    std::env::set_var(
+        "VOCALPRO_MODELS_DIR",
+        custom_models.to_string_lossy().to_string(),
+    );
+
+    let app_data = tmp.path().join("VocalProEnvTest");
+    let ctx = AppContext::new(app_data, python_bin(), worker_dir(), true).unwrap();
+
+    // Verify models_dir propagation
+    assert_eq!(ctx.models_dir(), custom_models.as_path());
+
+    // Start worker and ensure handshake succeeds with UTF-8 / models environment
+    let health = ctx.start_worker().unwrap();
+    assert!(health.running);
+    assert_eq!(health.worker_version, "3.0.0");
+
+    // Clean up environment variable
+    std::env::remove_var("VOCALPRO_MODELS_DIR");
+}
+
+#[tokio::test]
+async fn test_clean_worker_shutdown_leaves_zero_zombies() {
+    let tmp = tempdir().unwrap();
+    let app_data = tmp.path().join("VocalProShutdown");
+    let ctx = AppContext::new(app_data, python_bin(), worker_dir(), true).unwrap();
+
+    let health = ctx.start_worker().unwrap();
+    assert!(health.running);
+
+    let pids: Vec<u32> = health.slots.iter().filter_map(|s| s.pid).collect();
+    assert!(
+        !pids.is_empty(),
+        "Worker pool must have spawned at least 1 child PID"
+    );
+
+    // Verify processes are running initially
+    for &pid in &pids {
+        #[cfg(unix)]
+        {
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            assert!(
+                alive,
+                "Worker process {} should be running before shutdown",
+                pid
+            );
+        }
+    }
+
+    // Invoke clean shutdown (as called by window close / ExitRequested)
+    ctx.worker.shutdown();
+
+    // Allow OS brief grace period for process cleanup
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Verify health reflects stopped worker
+    let post_health = ctx.worker_health();
+    assert!(
+        !post_health.running,
+        "Worker pool must be reported stopped after shutdown"
+    );
+
+    // Verify all child processes have terminated and 0 zombie processes remain
+    for &pid in &pids {
+        #[cfg(unix)]
+        {
+            let res = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            assert_ne!(
+                res, 0,
+                "Child worker process {} should not be alive after shutdown (no zombies)",
+                pid
+            );
+        }
+    }
+}
+

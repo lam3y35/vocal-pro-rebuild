@@ -35,7 +35,6 @@ export const CanvasWaveform: React.FC<CanvasWaveformProps> = ({
     // Number of bars
     const barSpacing = 3;
     const numBars = Math.max(20, Math.min(peaks.length || 120, Math.floor(width / (barSpacing + 1))));
-    const step = Math.max(1, Math.floor((peaks.length || 1) / numBars));
     const barWidth = Math.max(2, (width / numBars) - 1.5);
     const midY = height / 2;
 
@@ -50,8 +49,18 @@ export const CanvasWaveform: React.FC<CanvasWaveformProps> = ({
     unplayedGradient.addColorStop(0, "#2D344B");
     unplayedGradient.addColorStop(1, "#1E2333");
 
+    // Sample across 100% of the audio peaks without truncating trailing samples
     for (let i = 0; i < numBars; i++) {
-      const peakVal = peaks.length > 0 ? (peaks[i * step] ?? 0.2) : 0.15;
+      let peakVal = 0.15;
+      if (peaks && peaks.length > 0) {
+        const startIdx = Math.floor((i / numBars) * peaks.length);
+        const endIdx = Math.max(startIdx + 1, Math.floor(((i + 1) / numBars) * peaks.length));
+        let maxP = 0;
+        for (let p = startIdx; p < endIdx && p < peaks.length; p++) {
+          if (peaks[p] > maxP) maxP = peaks[p];
+        }
+        peakVal = maxP || peaks[startIdx] || 0.15;
+      }
       const val = Math.max(0.08, Math.min(1.0, peakVal));
       const barH = val * (height * 0.82);
       const x = i * (width / numBars);

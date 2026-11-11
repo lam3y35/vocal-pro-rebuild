@@ -20,7 +20,10 @@ def analyze_audio_file(audio_path: str | Path) -> dict[str, Any]:
     path_str = str(audio_path)
 
     # 1. Decode up to 30 seconds at 22050 Hz mono for BPM and Krumhansl-Schmuckler Key detection
-    y_30s, sr = librosa.load(path_str, duration=30, res_type="kaiser_fast", mono=True)
+    try:
+        y_30s, sr = librosa.load(path_str, duration=30, res_type="soxr_hq", mono=True)
+    except Exception:
+        y_30s, sr = librosa.load(path_str, duration=30, res_type="scipy", mono=True)
     if len(y_30s) == 0:
         raise ValueError(f"Empty audio stream in {path_str}")
 

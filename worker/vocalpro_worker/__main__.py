@@ -8,13 +8,20 @@ import sys
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import torch
 
 from . import __version__
 from .analysis import analyze_audio_file
-from .engine import MODEL_POOL, JobCancelledError, WorkerEngineError, run_separation_job
+from .engine import (
+    MODEL_POOL,
+    JobCancelledError,
+    WorkerEngineError,
+    resolve_ffmpeg,
+    run_separation_job,
+)
 from .hardware import detect_hardware_profile, run_hardware_calibration
 from .midi import stem_to_midi_file
 from .protocol import StdioProtocol
@@ -62,6 +69,8 @@ class WorkerApp:
         cmd_id = str(cmd.get("id", ""))
         job_id = str(cmd.get("job_id", ""))
         try:
+            if cancel_ev.is_set():
+                raise JobCancelledError()
             res = run_separation_job(
                 job_id=job_id,
                 input_path_str=str(cmd["input_path"]),
@@ -83,6 +92,15 @@ class WorkerApp:
                 }
             )
         except JobCancelledError:
+            out_d = cmd.get("output_dir")
+            if out_d:
+                try:
+                    p = Path(out_d)
+                    if p.is_dir():
+                        for f in p.glob("*.*"):
+                            f.unlink(missing_ok=True)
+                except Exception:
+                    pass
             self.proto.send({"v": 1, "id": cmd_id, "event": "job_cancelled", "job_id": job_id})
         except WorkerEngineError as exc:
             self.proto.send(
@@ -213,6 +231,11 @@ class WorkerApp:
             cuda_ok, gpu_name, vram_mb = _gpu_info()
             hw = detect_hardware_profile().to_dict()
             devices = ["auto", "cpu"] + (["cuda"] if cuda_ok else [])
+            resolved_ffmpeg = resolve_ffmpeg()
+            ffmpeg_available = bool(
+                resolved_ffmpeg
+                and (shutil.which(resolved_ffmpeg) is not None or Path(resolved_ffmpeg).is_file())
+            )
             self.proto.send(
                 {
                     "v": 1,
@@ -220,7 +243,7 @@ class WorkerApp:
                     "event": "capabilities",
                     "models": list(MODEL_POOL),
                     "devices": devices,
-                    "ffmpeg_available": shutil.which("ffmpeg") is not None,
+                    "ffmpeg_available": ffmpeg_available,
                     "cuda_available": cuda_ok,
                     "gpu_name": gpu_name,
                     "vram_mb": vram_mb,

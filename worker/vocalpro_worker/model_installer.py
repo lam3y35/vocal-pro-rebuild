@@ -122,7 +122,10 @@ def download_verified(
 
 def checkpoints_dir() -> Path:
     if os.environ.get("VOCALPRO_MODELS_DIR"):
-        return Path(os.environ["VOCALPRO_MODELS_DIR"])
+        p = Path(os.environ["VOCALPRO_MODELS_DIR"])
+        if (p / "checkpoints").is_dir():
+            return p / "checkpoints"
+        return p
     try:
         import torch
 

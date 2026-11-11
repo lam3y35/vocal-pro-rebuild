@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, oneshot, Notify};
@@ -46,6 +46,59 @@ struct WorkerProcessSlot {
     active_cmd_id: Option<String>,
 }
 
+#[cfg(windows)]
+struct JobObject {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for JobObject {}
+#[cfg(windows)]
+unsafe impl Sync for JobObject {}
+
+#[cfg(windows)]
+impl JobObject {
+    fn new() -> Option<Self> {
+        unsafe {
+            use windows_sys::Win32::System::JobObjects::*;
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle == 0 {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+                return None;
+            }
+            Some(Self { handle })
+        }
+    }
+
+    fn assign(&self, process_handle: windows_sys::Win32::Foundation::HANDLE) -> bool {
+        unsafe {
+            windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(self.handle, process_handle) != 0
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for JobObject {
+    fn drop(&mut self) {
+        if self.handle != 0 {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
 struct SupervisorInner {
     slots: Vec<WorkerProcessSlot>,
     max_concurrent_workers: usize,
@@ -55,6 +108,8 @@ struct SupervisorInner {
     pending: HashMap<String, oneshot::Sender<WorkerEvent>>,
     logs: VecDeque<String>,
     pub queue: JobQueue,
+    #[cfg(windows)]
+    job_object: Option<JobObject>,
 }
 
 #[derive(Clone)]
@@ -62,6 +117,7 @@ pub struct WorkerSupervisor {
     python_bin: PathBuf,
     worker_pythonpath: PathBuf,
     fast_test_model: bool,
+    models_dir: PathBuf,
     inner: Arc<Mutex<SupervisorInner>>,
     slot_notify: Arc<Notify>,
     event_tx: broadcast::Sender<WorkerEvent>,
@@ -95,9 +151,16 @@ impl WorkerSupervisor {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn new(python_bin: PathBuf, worker_pythonpath: PathBuf, fast_test_model: bool) -> Self {
+    pub fn new(
+        python_bin: PathBuf,
+        worker_pythonpath: PathBuf,
+        fast_test_model: bool,
+        models_dir: PathBuf,
+    ) -> Self {
         let default_concurrency = compute_memory_aware_default_workers();
         let (event_tx, _) = broadcast::channel(512);
+        #[cfg(windows)]
+        let job_object = JobObject::new();
         let inner = SupervisorInner {
             slots: Vec::new(),
             max_concurrent_workers: default_concurrency,
@@ -120,15 +183,22 @@ impl WorkerSupervisor {
             pending: HashMap::new(),
             logs: VecDeque::with_capacity(MAX_LOG_LINES),
             queue: JobQueue::new(),
+            #[cfg(windows)]
+            job_object,
         };
         Self {
             python_bin,
             worker_pythonpath,
             fast_test_model,
+            models_dir,
             inner: Arc::new(Mutex::new(inner)),
             slot_notify: Arc::new(Notify::new()),
             event_tx,
         }
+    }
+
+    pub fn models_dir(&self) -> &Path {
+        &self.models_dir
     }
 
     /// Current hard cap (RAM, physical cores, VRAM) for concurrent workers on this machine.
@@ -196,16 +266,42 @@ impl WorkerSupervisor {
 
     fn spawn_slot(&self, slot_id: usize) -> AppResult<()> {
         let mut cmd = Command::new(&self.python_bin);
+        crate::system::silent_command(&mut cmd);
+
         cmd.arg("-m")
             .arg("vocalpro_worker")
             .env("PYTHONPATH", &self.worker_pythonpath)
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUNBUFFERED", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        let models_dir_str = self.models_dir.to_string_lossy().to_string();
+        cmd.env("TORCH_HOME", &models_dir_str)
+            .env("VOCALPRO_MODELS_DIR", &models_dir_str);
+
         if self.fast_test_model {
             cmd.env("VOCALPRO_TEST_FAST_MODEL", "1");
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let parent_pid = std::process::id() as libc::pid_t;
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                cmd.pre_exec(move || {
+                    let ret = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+                    if ret != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::getppid() != parent_pid {
+                        libc::_exit(1);
+                    }
+                    Ok(())
+                });
+            }
         }
 
         let mut child = cmd.spawn().map_err(|e| {
@@ -219,6 +315,15 @@ impl WorkerSupervisor {
             }
             AppError::System(msg)
         })?;
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let mut g = self.lock_inner();
+            if let Some(ref job) = g.job_object {
+                job.assign(child.as_raw_handle() as _);
+            }
+        }
 
         let pid = Some(child.id());
         let stdin = child
@@ -234,17 +339,34 @@ impl WorkerSupervisor {
             .take()
             .ok_or_else(|| AppError::System("Failed to open worker stderr".to_string()))?;
 
+        // Feature 11: Spawn child stderr reader thread BEFORE reading stdout handshake
+        // so extensive startup diagnostics/tracebacks cannot saturate the OS pipe buffer and deadlock startup.
+        let inner_err = Arc::clone(&self.inner);
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line_res in reader.lines() {
+                let Ok(line) = line_res else { break };
+                let mut g = inner_err.lock().unwrap_or_else(|e| e.into_inner());
+                if g.logs.len() >= MAX_LOG_LINES {
+                    g.logs.pop_front();
+                }
+                g.logs
+                    .push_back(format!("[slot-{}:stderr] {}", slot_id, line));
+            }
+        });
+
         let mut stdout_reader = BufReader::new(stdout);
         let mut first_line = String::new();
         stdout_reader.read_line(&mut first_line)?;
         if first_line.trim().is_empty() {
-            use std::io::Read;
-            let mut err_msg = String::new();
-            let _ = BufReader::new(stderr).read_to_string(&mut err_msg);
+            let recent_logs = {
+                let g = self.lock_inner();
+                g.logs.iter().rev().take(10).cloned().collect::<Vec<_>>()
+            };
             let msg = format!(
-                "Worker slot {} exited prematurely during startup: {}",
+                "Worker slot {} exited prematurely during startup. Diagnostics:\n{}",
                 slot_id,
-                err_msg.trim()
+                recent_logs.into_iter().rev().collect::<Vec<_>>().join("\n")
             );
             if let Ok(mut g) = self.inner.lock() {
                 g.health.running = false;
@@ -491,21 +613,6 @@ impl WorkerSupervisor {
             }
             Self::refresh_health_slots(&mut g);
             notify_out.notify_waiters();
-        });
-
-        // Spawn stderr ring-buffer reader thread
-        let inner_err = Arc::clone(&self.inner);
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line_res in reader.lines() {
-                let Ok(line) = line_res else { break };
-                let mut g = inner_err.lock().unwrap_or_else(|e| e.into_inner());
-                if g.logs.len() >= MAX_LOG_LINES {
-                    g.logs.pop_front();
-                }
-                g.logs
-                    .push_back(format!("[slot-{}:stderr] {}", slot_id, line));
-            }
         });
 
         Ok(())

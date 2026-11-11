@@ -59,34 +59,34 @@ pub fn write_encoded_audio(
     }
 
     let ffmpeg_bin = crate::system::resolve_ffmpeg_path();
+    let mut cmd = Command::new(&ffmpeg_bin);
+    crate::system::silent_command(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
     let status = if fmt == "mp3" {
-        Command::new(&ffmpeg_bin)
-            .args([
-                "-y",
-                "-i",
-                &tmp_wav.to_string_lossy(),
-                "-codec:a",
-                "libmp3lame",
-                "-b:a",
-                if bitrate.is_empty() { "320k" } else { bitrate },
-                &target_path.to_string_lossy(),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+        cmd.args([
+            "-y",
+            "-i",
+            &tmp_wav.to_string_lossy(),
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            if bitrate.is_empty() { "320k" } else { bitrate },
+            &target_path.to_string_lossy(),
+        ])
+        .status()
     } else if fmt == "flac" {
-        Command::new(&ffmpeg_bin)
-            .args([
-                "-y",
-                "-i",
-                &tmp_wav.to_string_lossy(),
-                "-codec:a",
-                "flac",
-                &target_path.to_string_lossy(),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+        cmd.args([
+            "-y",
+            "-i",
+            &tmp_wav.to_string_lossy(),
+            "-codec:a",
+            "flac",
+            &target_path.to_string_lossy(),
+        ])
+        .status()
     } else {
         let _ = std::fs::remove_file(&tmp_wav);
         return Err(AppError::InvalidInput(format!(

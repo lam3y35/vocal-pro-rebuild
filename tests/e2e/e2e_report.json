@@ -1,0 +1,442 @@
+{
+  "vocalpro_version": "3.0.0",
+  "timestamp": "2026-11-11T13:49:20.998798+00:00",
+  "overall_status": "PASSED",
+  "environment": {
+    "platform": "Linux-6.12.105+-x86_64-with-glibc2.36",
+    "python_version": "3.11.2",
+    "system": "Linux",
+    "machine": "x86_64"
+  },
+  "summary": {
+    "total_tests": 51,
+    "passed": 51,
+    "failed": 0,
+    "skipped": 0,
+    "pass_rate_percent": 100.0,
+    "total_duration_s": 249.146
+  },
+  "tiers": [
+    {
+      "tier_num": 1,
+      "tier_id": "tier1",
+      "name": "Tier 1: Core Feature Functional Coverage",
+      "description": "Functional verification of separation, analysis, model mgmt, export/mixing, and lifecycle",
+      "file": "tests/e2e/test_tier1_features.py",
+      "status": "PASSED",
+      "total": 25,
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0,
+      "duration_s": 96.373,
+      "tests": [
+        {
+          "name": "test_t1_sep_01_two_stem_vocal_instrumental",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 5.376,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_sep_02_four_stem_htdemucs",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 5.47,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_sep_03_six_stem_htdemucs_6s",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 3.957,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_sep_04_multi_format_decoding",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 6.049,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_sep_05_video_container_extraction",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 6.059,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_ana_01_musical_key_and_bpm",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 4.875,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_ana_02_dynamic_range_and_rms_peak",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 0.01,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_ana_03_fast_waveform_peaks_8000",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 4.745,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_ana_04_duration_and_channel_detection",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 4.632,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_ana_05_spectral_centroid_and_pitch",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 0.016,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_mdl_01_model_registry_enumeration",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 2.356,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_mdl_02_offline_model_cache_discovery",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 4.847,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_mdl_03_warm_model_persistence",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 5.19,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_mdl_04_device_selection_cpu_cuda",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 4.63,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_mdl_05_missing_model_error_handling",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 2.267,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_exp_01_stem_solo_mix_export",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 0.023,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_exp_02_multistem_mix_gain_pan",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 0.02,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_exp_03_multiformat_bit_depth_export",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 5.615,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_exp_04_compressed_export_formats",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 6.887,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_exp_05_output_stem_deduplication_and_naming",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 5.662,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_can_01_cooperative_cancellation_under_500ms",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 2.603,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_can_02_partial_stem_cleanup_on_cancel",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 2.687,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_can_03_worker_process_reuse_after_cancel",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 5.782,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_can_04_parent_termination_cleanup",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 3.076,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t1_can_05_json_ipc_ping_pong_keepalive",
+          "classname": "tests.e2e.test_tier1_features",
+          "duration_s": 2.452,
+          "status": "PASSED",
+          "message": ""
+        }
+      ],
+      "returncode": 0
+    },
+    {
+      "tier_num": 2,
+      "tier_id": "tier2",
+      "name": "Tier 2: Boundary, Edge & Corner Cases",
+      "description": "Corrupt/0-byte files, extreme durations, Arabic Unicode paths, OOM fallback, and digital silence",
+      "file": "tests/e2e/test_tier2_boundaries.py",
+      "status": "PASSED",
+      "total": 15,
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0,
+      "duration_s": 76.536,
+      "tests": [
+        {
+          "name": "test_t2_bnd_01_zero_length_file",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 2.943,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_bnd_02_corrupt_header_file",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 2.572,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_bnd_03_ultra_short_subsecond_clip",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 5.075,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_bnd_04_large_multichunk_boundary",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 7.742,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_bnd_05_digital_silence_no_nan",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 5.046,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_bnd_06_clipped_max_dbfs",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 5.108,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_pth_01_arabic_unicode_filename",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 5.069,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_pth_02_deeply_nested_long_path",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 5.088,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_pth_03_spaces_quotes_special_characters",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 5.17,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_pth_04_readonly_output_directory",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 2.541,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_pth_05_deleted_input_file",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 2.559,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_res_01_simulated_oom_fallback",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 4.906,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_res_02_multichunk_memory_leak_check",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 8.26,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_res_03_mono_and_surround_channels",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 5.746,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t2_res_04_extreme_sample_rates",
+          "classname": "tests.e2e.test_tier2_boundaries",
+          "duration_s": 7.487,
+          "status": "PASSED",
+          "message": ""
+        }
+      ],
+      "returncode": 0
+    },
+    {
+      "tier_num": 3,
+      "tier_id": "tier3",
+      "name": "Tier 3: Cross-Feature Combinations & Concurrency",
+      "description": "Mixed batches, cancel-and-switch, live mixer export, concurrent analysis, and Arabic 24-bit FLAC",
+      "file": "tests/e2e/test_tier3_combinations.py",
+      "status": "PASSED",
+      "total": 6,
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "duration_s": 34.147,
+      "tests": [
+        {
+          "name": "test_t3_cmb_01_mixed_format_batch_with_fault_isolation",
+          "classname": "tests.e2e.test_tier3_combinations",
+          "duration_s": 6.262,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t3_cmb_02_rapid_cancel_and_switch_model",
+          "classname": "tests.e2e.test_tier3_combinations",
+          "duration_s": 6.045,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t3_cmb_03_separation_shifts_overlap_and_live_mixer_export",
+          "classname": "tests.e2e.test_tier3_combinations",
+          "duration_s": 5.126,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t3_cmb_04_concurrent_analysis_and_separation",
+          "classname": "tests.e2e.test_tier3_combinations",
+          "duration_s": 7.53,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t3_cmb_05_rapid_lifecycle_signal_shutdown",
+          "classname": "tests.e2e.test_tier3_combinations",
+          "duration_s": 3.124,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t3_cmb_06_arabic_path_six_stem_flac24_export",
+          "classname": "tests.e2e.test_tier3_combinations",
+          "duration_s": 4.885,
+          "status": "PASSED",
+          "message": ""
+        }
+      ],
+      "returncode": 0
+    },
+    {
+      "tier_num": 4,
+      "tier_id": "tier4",
+      "name": "Tier 4: Real-World User Journeys & Studio Workflows",
+      "description": "Studio mastering, karaoke remix video remux, vocal-to-MIDI transcription, album queue, air-gap",
+      "file": "tests/e2e/test_tier4_scenarios.py",
+      "status": "PASSED",
+      "total": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "duration_s": 42.085,
+      "tests": [
+        {
+          "name": "test_t4_scn_01_studio_mastering_workflow",
+          "classname": "tests.e2e.test_tier4_scenarios",
+          "duration_s": 9.287,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t4_scn_02_karaoke_producer_remix",
+          "classname": "tests.e2e.test_tier4_scenarios",
+          "duration_s": 7.855,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t4_scn_03_musician_vocal_to_midi_transcription",
+          "classname": "tests.e2e.test_tier4_scenarios",
+          "duration_s": 9.302,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t4_scn_04_album_batch_production_workflow",
+          "classname": "tests.e2e.test_tier4_scenarios",
+          "duration_s": 6.668,
+          "status": "PASSED",
+          "message": ""
+        },
+        {
+          "name": "test_t4_scn_05_air_gapped_offline_operation",
+          "classname": "tests.e2e.test_tier4_scenarios",
+          "duration_s": 7.722,
+          "status": "PASSED",
+          "message": ""
+        }
+      ],
+      "returncode": 0
+    }
+  ]
+}

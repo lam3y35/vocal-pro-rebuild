@@ -170,11 +170,8 @@ pub mod bridge {
         let volumes = {
             let guard = ctx.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = guard.as_ref() {
-                m.snapshot()
-                    .stems
-                    .into_iter()
-                    .map(|s| (s.name, if s.mute { 0.0 } else { s.gain }))
-                    .collect()
+                let snap = m.snapshot();
+                crate::audio::mixer::LiveStemMixer::compute_effective_volumes(&snap.stems)
             } else {
                 HashMap::new()
             }
@@ -198,11 +195,8 @@ pub mod bridge {
         let volumes = {
             let guard = ctx.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = guard.as_ref() {
-                m.snapshot()
-                    .stems
-                    .into_iter()
-                    .map(|s| (s.name, if s.mute { 0.0 } else { s.gain }))
-                    .collect()
+                let snap = m.snapshot();
+                crate::audio::mixer::LiveStemMixer::compute_effective_volumes(&snap.stems)
             } else {
                 HashMap::new()
             }

@@ -15,6 +15,18 @@ pub const SUPPORTED_FILE_ASSOCIATION_EXTS: &[&str] = &[
     ".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mkv", ".avi", ".mov",
 ];
 
+/// Suppress flashing console windows on Windows (CREATE_NO_WINDOW = 0x08000000).
+#[cfg(windows)]
+pub fn silent_command(cmd: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x08000000)
+}
+
+#[cfg(not(windows))]
+pub fn silent_command(cmd: &mut Command) -> &mut Command {
+    cmd
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangelogRelease {
     pub version: String,
@@ -624,7 +636,9 @@ pub fn register_file_associations(app_data_dir: &Path, exe_path: Option<&Path>) 
         let exe_str = exe.to_string_lossy();
         let prog_id = "VocalPro.AudioFile";
 
-        let _ = Command::new("reg")
+        let mut cmd1 = Command::new("reg");
+        silent_command(&mut cmd1);
+        let _ = cmd1
             .args([
                 "add",
                 &format!("HKCU\\Software\\Classes\\{}", prog_id),
@@ -635,7 +649,9 @@ pub fn register_file_associations(app_data_dir: &Path, exe_path: Option<&Path>) 
             ])
             .status();
 
-        let _ = Command::new("reg")
+        let mut cmd2 = Command::new("reg");
+        silent_command(&mut cmd2);
+        let _ = cmd2
             .args([
                 "add",
                 &format!("HKCU\\Software\\Classes\\{}\\shell\\open\\command", prog_id),
@@ -647,7 +663,9 @@ pub fn register_file_associations(app_data_dir: &Path, exe_path: Option<&Path>) 
             .status();
 
         for ext in SUPPORTED_FILE_ASSOCIATION_EXTS {
-            let _ = Command::new("reg")
+            let mut cmd3 = Command::new("reg");
+            silent_command(&mut cmd3);
+            let _ = cmd3
                 .args([
                     "add",
                     &format!("HKCU\\Software\\Classes\\{}", ext),
@@ -682,7 +700,9 @@ pub fn create_desktop_shortcut(app_data_dir: &Path, exe_path: Option<&Path>) -> 
             lnk.to_string_lossy(),
             exe.to_string_lossy()
         );
-        let _ = Command::new("powershell")
+        let mut ps_cmd = Command::new("powershell");
+        silent_command(&mut ps_cmd);
+        let _ = ps_cmd
             .args(["-NoProfile", "-Command", &ps_script])
             .status();
         lnk
@@ -833,7 +853,9 @@ pub fn extract_path_filename(url: &str) -> Option<String> {
 }
 
 pub fn fetch_webpage_title(url: &str) -> Option<String> {
-    let output = Command::new("curl")
+    let mut title_cmd = Command::new("curl");
+    silent_command(&mut title_cmd);
+    let output = title_cmd
         .args(["-L", "-s", "--max-time", "4", "-r", "0-16384", url])
         .output()
         .ok()?;
@@ -979,7 +1001,9 @@ pub fn download_media_url(
     std::fs::create_dir_all(downloads_dir)?;
 
     // 1. Run curl with -O -J to automatically extract the remote filename from Content-Disposition
-    let curl_output = Command::new("curl")
+    let mut curl_cmd1 = Command::new("curl");
+    silent_command(&mut curl_cmd1);
+    let curl_output = curl_cmd1
         .current_dir(downloads_dir)
         .args([
             "-L",
@@ -1061,7 +1085,9 @@ pub fn download_media_url(
         }
         let fallback_path = downloads_dir.join(&sanitized);
 
-        let status = Command::new("curl")
+        let mut curl_cmd2 = Command::new("curl");
+        silent_command(&mut curl_cmd2);
+        let status = curl_cmd2
             .args([
                 "-L",
                 "-s",

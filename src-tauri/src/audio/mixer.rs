@@ -286,6 +286,24 @@ impl LiveStemMixer {
         false
     }
 
+    /// Calculate effective volumes honoring solo and mute flags:
+    /// If any stem is soloed, only stems with (solo && !mute) get their gain; all others get 0.0.
+    /// If no stem is soloed, all stems with !mute get their gain; muted stems get 0.0.
+    pub fn compute_effective_volumes(stems: &[StemTrackInfo]) -> HashMap<String, f32> {
+        let any_solo = stems.iter().any(|s| s.solo);
+        stems
+            .iter()
+            .map(|s| {
+                let active = if any_solo {
+                    s.solo && !s.mute
+                } else {
+                    !s.mute
+                };
+                (s.name.clone(), if active { s.gain } else { 0.0 })
+            })
+            .collect()
+    }
+
     pub fn apply_volumes_map(&self, volumes: &HashMap<String, f32>) {
         for s in &self.stems {
             if let Some(&vol) = volumes.get(&s.name) {

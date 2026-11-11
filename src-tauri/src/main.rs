@@ -228,7 +228,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         use vocalpro_lib::commands::tauri_bridge::bridge;
         tauri::Builder::default()
-            .manage(ctx)
+            .manage(ctx.clone())
+            .on_window_event({
+                let ctx = ctx.clone();
+                move |_window, event| match event {
+                    tauri::WindowEvent::Destroyed | tauri::WindowEvent::CloseRequested { .. } => {
+                        eprintln!("[SHUTDOWN] Window close/destroyed event — terminating AI worker pool");
+                        ctx.worker.shutdown();
+                    }
+                    _ => {}
+                }
+            })
             .invoke_handler(tauri::generate_handler![
                 bridge::worker_health,
                 bridge::restart_worker,
@@ -273,7 +283,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bridge::pick_output_dir,
                 bridge::open_folder,
             ])
-            .run(tauri::generate_context!())?;
+            .build(tauri::generate_context!())?
+            .run({
+                let ctx = ctx.clone();
+                move |_app_handle, event| {
+                    if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                        eprintln!("[SHUTDOWN] App exiting — terminating all worker processes");
+                        ctx.worker.shutdown();
+                    }
+                }
+            });
         return Ok(());
     }
 

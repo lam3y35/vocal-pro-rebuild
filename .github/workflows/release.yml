@@ -40,13 +40,54 @@ jobs:
           npx tauri build --no-bundle -f desktop-shell
 
       - name: Stage Release Bundle & Preload Model
+        shell: powershell
         run: |
-          python -m pip install torch demucs soundfile numpy scipy librosa mido resampy
-          python -m pip install --target dist/bundle/engine torch demucs soundfile numpy scipy librosa mido resampy
-          mkdir -p dist/bundle
-          mkdir -p dist/installer
-          cp src-tauri/target/release/vocalpro.exe dist/bundle/vocalpro.exe
-        shell: bash
+          New-Item -ItemType Directory -Force -Path dist\bundle\engine
+          New-Item -ItemType Directory -Force -Path dist\bundle\models
+          New-Item -ItemType Directory -Force -Path dist\installer
+
+          # 1. Download official Python 3.11 embeddable runtime
+          $pyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip"
+          $pyZip = "python-3.11.9-embed-amd64.zip"
+          Invoke-WebRequest -Uri $pyUrl -OutFile $pyZip
+          Expand-Archive -Path $pyZip -DestinationPath dist\bundle\engine -Force
+          Remove-Item $pyZip
+
+          # 2. Enable site-packages in python311._pth
+          $pthFile = "dist\bundle\engine\python311._pth"
+          if (Test-Path $pthFile) {
+              $content = Get-Content $pthFile
+              $content = $content -replace '#import site', 'import site'
+              $content += "`n."
+              $content += "`nLib\site-packages"
+              $content | Set-Content $pthFile
+          }
+
+          # 3. Bootstrap pip into embeddable runtime
+          $getPipUrl = "https://bootstrap.pypa.io/get-pip.py"
+          Invoke-WebRequest -Uri $getPipUrl -OutFile dist\bundle\engine\get-pip.py
+          & dist\bundle\engine\python.exe dist\bundle\engine\get-pip.py --no-warn-script-location
+          Remove-Item dist\bundle\engine\get-pip.py
+
+          # 4. Install PyTorch CPU, Demucs, and audio processing dependencies
+          & dist\bundle\engine\python.exe -m pip install --timeout 120 --retries 5 torch torchaudio --index-url https://download.pytorch.org/whl/cpu --no-warn-script-location
+          & dist\bundle\engine\python.exe -m pip install --timeout 120 --retries 5 demucs soundfile numpy scipy librosa noisereduce mido resampy platformdirs --no-warn-script-location
+
+          # 5. Download static 64-bit ffmpeg.exe
+          $ffmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip"
+          $ffmpegZip = "ffmpeg.zip"
+          Invoke-WebRequest -Uri $ffmpegUrl -OutFile $ffmpegZip
+          Expand-Archive -Path $ffmpegZip -DestinationPath ffmpeg_extracted -Force
+          $ffmpegExe = Get-ChildItem -Path ffmpeg_extracted -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName -Destination dist\bundle\ffmpeg.exe
+          Remove-Item -Recurse -Force ffmpeg_extracted, $ffmpegZip
+
+          # 6. Preload and verify offline Demucs default model weights
+          $env:PYTHONPATH = "$PWD\worker"
+          & dist\bundle\engine\python.exe -m vocalpro_worker.model_installer htdemucs --target dist\bundle\models
+
+          # 7. Copy native Tauri executable to bundle
+          Copy-Item src-tauri\target\release\vocalpro.exe -Destination dist\bundle\vocalpro.exe
 
       - name: Compile Inno Setup Installer
         run: |

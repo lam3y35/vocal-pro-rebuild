@@ -1,7 +1,8 @@
 @echo off
+chcp 65001 >nul 2>&1
+cd /d "%~dp0"
 title VocalPro v3 -- Studio AI Vocal Separator
 color 0B
-cd /d "%~dp0"
 
 echo ==============================================================================
 echo                      VocalPro v3.0.0 -- Studio Workstation
@@ -9,7 +10,7 @@ echo ===========================================================================
 echo.
 
 :: 1. Ensure Python AI worker engine is installed
-set "VENV_PY=worker\.venv\Scripts\python.exe"
+set "VENV_PY=%~dp0worker\.venv\Scripts\python.exe"
 set "APPDATA_PY=%APPDATA%\VocalPro\engine\venv\Scripts\python.exe"
 set "ENGINE_READY=0"
 
@@ -26,7 +27,7 @@ if %ENGINE_READY% equ 0 (
     echo [Notice] Python AI engine dependencies are not yet installed.
     echo Running automated setup first...
     echo.
-    call setup.bat
+    call "%~dp0setup.bat"
     if %ERRORLEVEL% neq 0 (
         echo [ERROR] Setup encountered an issue.
         pause
@@ -38,9 +39,9 @@ if %ENGINE_READY% equ 0 (
 if "%~1"=="--dev" goto RUN_DEV
 
 :: 2. Launch pre-compiled desktop release executable if present (instant startup)
-if exist "release\vocalpro.exe" (
+if exist "%~dp0release\vocalpro.exe" (
     echo [INFO] Starting VocalPro Desktop Application...
-    start "" "release\vocalpro.exe"
+    start "" "%~dp0release\vocalpro.exe"
     exit /b 0
 )
 

@@ -4578,6 +4578,7 @@ dependencies = [
  "dirs 5.0.1",
  "hex",
  "hound",
+ "libc",
  "rfd",
  "rubato",
  "rusqlite",
@@ -4594,6 +4595,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.48.0",
  "zip",
 ]
 

@@ -33,8 +33,10 @@ BASELINE_DIR = BENCH_DIR / "baseline"
 def run_legacy_analyze_audio(audio_path: Path) -> tuple[dict, float]:
     """Exact reproduction of api_server/main.py:868-990 analyze_audio (including P-02 double decode)."""
     t0 = time.perf_counter()
-    # Decode #1: 30s for BPM and Key
-    y, sr = librosa.load(str(audio_path), duration=30, res_type="kaiser_fast", mono=True)
+    try:
+        y, sr = librosa.load(str(audio_path), duration=30, res_type="soxr_hq", mono=True)
+    except Exception:
+        y, sr = librosa.load(str(audio_path), duration=30, res_type="scipy", mono=True)
     duration = librosa.get_duration(path=str(audio_path))
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     bpm = round(float(np.asarray(tempo).flat[0]))

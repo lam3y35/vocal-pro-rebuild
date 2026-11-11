@@ -8,10 +8,19 @@ from typing import Callable, Optional
 import librosa
 import noisereduce as nr
 import numpy as np
+import torch
 from scipy.ndimage import maximum_filter, median_filter, uniform_filter1d
 from scipy.signal import butter, sosfilt, sosfiltfilt, tf2sos
 
 logger = logging.getLogger(__name__)
+
+_HANN_WINDOW_CACHE: dict[int, torch.Tensor] = {}
+
+
+def _get_hann_window(n_fft: int) -> torch.Tensor:
+    if n_fft not in _HANN_WINDOW_CACHE:
+        _HANN_WINDOW_CACHE[n_fft] = torch.hann_window(n_fft, periodic=True)
+    return _HANN_WINDOW_CACHE[n_fft]
 
 
 def detect_vocal_activity(
@@ -31,9 +40,32 @@ def detect_vocal_activity(
 
     total_samples = len(mono)
 
-    rms = librosa.feature.rms(y=mono, frame_length=frame_length, hop_length=hop_length)[0]
-    rms_db = librosa.amplitude_to_db(rms, ref=np.max)
-    flatness = librosa.feature.spectral_flatness(y=mono, hop_length=hop_length)[0]
+    # 1. Fast vectorized RMS via strided framing (1.4ms)
+    pad_len = frame_length // 2
+    padded = np.pad(mono, (pad_len, pad_len), mode="constant")
+    strides = (mono.itemsize * hop_length, mono.itemsize)
+    shape = ((len(padded) - frame_length) // hop_length + 1, frame_length)
+    windows = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
+    power = np.einsum("ij,ij->i", windows, windows) / frame_length
+    rms = np.sqrt(power)
+    ref_val = float(np.max(rms)) if len(rms) > 0 else 1.0
+    log_spec = 20.0 * np.log10(np.maximum(1e-5, rms)) - 20.0 * np.log10(max(1e-5, ref_val))
+    rms_db = np.maximum(log_spec, log_spec.max() - 80.0)
+
+    # 2. Fast vectorized Spectral Flatness via PyTorch (isolated to 1 thread to prevent OpenMP contention)
+    window = _get_hann_window(frame_length)
+    orig_th = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        tensor = torch.from_numpy(mono.astype(np.float32, copy=False))
+        stft = torch.stft(tensor, n_fft=frame_length, hop_length=hop_length, window=window, center=True, return_complex=True)
+        s_mag = torch.abs(stft)
+        s_thresh = torch.clamp(s_mag**2.0, min=1e-10)
+        gmean = torch.exp(torch.mean(torch.log(s_thresh), dim=-2))
+        amean = torch.mean(s_thresh, dim=-2)
+        flatness = (gmean / amean).numpy()
+    finally:
+        torch.set_num_threads(orig_th)
 
     vocal_score = (rms_db > threshold_db).astype(np.float32) * 0.6 + (1.0 - flatness) * 0.4
 

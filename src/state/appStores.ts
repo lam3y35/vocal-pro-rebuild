@@ -89,7 +89,24 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     set((s) => ({
       options: { ...s.options, ...patch },
     }));
-    void invokeCommand("update_settings", { patch });
+    const settingsPatch: Record<string, any> = {};
+    if (patch.model !== undefined) settingsPatch.model_name = patch.model;
+    if (patch.device !== undefined) settingsPatch.device = patch.device;
+    if (patch.output_format !== undefined) settingsPatch.output_format = patch.output_format;
+    if (patch.wav_bit_depth !== undefined) settingsPatch.wav_bit_depth = patch.wav_bit_depth;
+    if (patch.audio_bitrate !== undefined) settingsPatch.mp3_bitrate = patch.audio_bitrate;
+    if (patch.shifts !== undefined) settingsPatch.shifts = patch.shifts;
+    if (patch.overlap !== undefined) settingsPatch.overlap = patch.overlap;
+    if (patch.segment !== undefined) settingsPatch.segment = patch.segment;
+    if (patch.fp16_inference !== undefined) settingsPatch.fp16_inference = patch.fp16_inference;
+    if (patch.enable_loudness_normalize !== undefined) {
+      settingsPatch.enable_loudness_normalize = patch.enable_loudness_normalize;
+    }
+    if (patch.enable_spectral_denoise !== undefined) {
+      settingsPatch.enable_spectral_denoise = patch.enable_spectral_denoise;
+    }
+    if (patch.song_mode !== undefined) settingsPatch.song_mode = patch.song_mode;
+    void invokeCommand("update_settings", { patch: settingsPatch });
   },
   toggleSongMode: (enabled) => {
     set((s) => ({
@@ -356,19 +373,33 @@ export const useJobsStore = create<JobsState>((set, get) => ({
         }
 
         for (const rec of records) {
-          appendLog(
-            `[job_done] Completed ${rec.input_path} -> ${rec.stems.length} stems written to ${rec.output_dir}`
-          );
-          if (get().autoOpenFolder && rec.output_dir) {
-            void invokeCommand("open_folder", { path: rec.output_dir });
+          if (!rec.stems || rec.stems.length === 0 || (rec as any).status === "failed") {
+            const fname = rec.input_path.split(/[\\/]/).pop() || "track";
+            useSystemStore.getState().showBanner(`Warning: ${fname} failed: ${(rec as any).error_message || "no stems generated"}`);
+          } else {
+            appendLog(
+              `[job_done] Completed ${rec.input_path} -> ${rec.stems.length} stems written to ${rec.output_dir}`
+            );
+            if (get().autoOpenFolder && rec.output_dir) {
+              void invokeCommand("open_folder", { path: rec.output_dir });
+            }
           }
         }
     } catch (err: any) {
-      appendLog(`[batch_error] Failed separation batch: ${err?.message || err}`);
+      const errStr = String(err?.message || err);
+      appendLog(`[batch_error] Failed separation batch: ${errStr}`);
+      const isMissingModel =
+        errStr.toLowerCase().includes("model") ||
+        errStr.toLowerCase().includes("weight") ||
+        errStr.toLowerCase().includes("not found");
+      const userMessage = isMissingModel
+        ? "AI model not found locally. Run setup.bat once or check {localappdata}\\VocalPro\\models."
+        : `Separation error: ${errStr}`;
+      useSystemStore.getState().showBanner(userMessage);
       set((s) => ({
         jobs: s.jobs.map((j) =>
           newJobs.some((nj) => nj.job_id === j.job_id)
-            ? { ...j, status: "failed", error_message: String(err?.message || err) }
+            ? { ...j, status: "failed", error_message: userMessage }
             : j
         ),
       }));
@@ -602,18 +633,31 @@ export const useMixerStore = create<MixerState>((set, get) => ({
 
       if (playheadTimer) clearInterval(playheadTimer);
       playheadTimer = setInterval(() => {
-        const firstAudio = stemAudioMap.values().next().value;
-        if (firstAudio && !isNaN(firstAudio.currentTime)) {
-          const curr = firstAudio.currentTime;
+        const audioElements = Array.from(stemAudioMap.values());
+        const masterAudio = audioElements[0];
+        if (masterAudio && !isNaN(masterAudio.currentTime)) {
+          const masterTime = masterAudio.currentTime;
           const dur = get().durationSec;
-          if (curr >= dur && dur > 0) {
+
+          // Multi-track active drift compensation: keep all stems locked to master clock (< 15ms)
+          for (let idx = 1; idx < audioElements.length; idx++) {
+            const slaveAudio = audioElements[idx];
+            if (!isNaN(slaveAudio.currentTime) && !slaveAudio.paused) {
+              const drift = Math.abs(slaveAudio.currentTime - masterTime);
+              if (drift > 0.015) {
+                slaveAudio.currentTime = masterTime;
+              }
+            }
+          }
+
+          if (masterTime >= dur && dur > 0) {
             stopAllAudio();
             set({ playing: false, playheadSec: 0 });
           } else {
-            set({ playheadSec: curr });
+            set({ playheadSec: masterTime });
           }
         } else {
-          const next = get().playheadSec + 0.1;
+          const next = get().playheadSec + 0.08;
           if (next >= get().durationSec && get().durationSec > 0) {
             stopAllAudio();
             set({ playing: false, playheadSec: 0 });
@@ -621,7 +665,7 @@ export const useMixerStore = create<MixerState>((set, get) => ({
             set({ playheadSec: next });
           }
         }
-      }, 100);
+      }, 80);
 
       set({ playing: true, playheadSec: startSec });
     }
@@ -1356,11 +1400,58 @@ export const useSystemStore = create<SystemState>((set, get) => ({
         if (settings.ui_scale) set({ uiScale: Number(settings.ui_scale) as any });
         if (settings.high_contrast !== undefined) set({ highContrast: Boolean(settings.high_contrast) });
         if (settings.reduced_motion !== undefined) set({ reducedMotion: Boolean(settings.reduced_motion) });
+        if (settings.always_on_top !== undefined) set({ alwaysOnTop: Boolean(settings.always_on_top) });
+        if (settings.minimize_to_tray !== undefined) set({ minimizeToTray: Boolean(settings.minimize_to_tray) });
+        if (settings.naming_template) set({ namingTemplate: settings.naming_template });
+        if (settings.conflict_policy) set({ conflictPolicy: settings.conflict_policy });
+        if (settings.preserve_folder_structure !== undefined) {
+          set({ preserveFolderStructure: Boolean(settings.preserve_folder_structure) });
+        }
+        if (settings.hardware_profile_mode) {
+          const raw = String(settings.hardware_profile_mode).toLowerCase();
+          const modeMap: Record<string, PerformanceProfileMode> = {
+            auto: "Auto",
+            eco: "Eco",
+            balanced: "Balanced",
+            max_quality: "Max Quality",
+          };
+          if (modeMap[raw]) set({ activeProfileMode: modeMap[raw] });
+        }
+
         if (settings.custom_output_dir) {
           useJobsStore.setState({ customOutputDir: settings.custom_output_dir });
         }
         if (settings.max_concurrent_jobs) {
           useJobsStore.setState({ parallelWorkers: Number(settings.max_concurrent_jobs) });
+        }
+
+        // Restore model, device, DSP parameters, and export settings
+        const jobPatch: Partial<JobOptions> = {};
+        if (settings.model_name) jobPatch.model = settings.model_name;
+        if (settings.device) jobPatch.device = settings.device;
+        if (settings.output_format) jobPatch.output_format = settings.output_format;
+        if (settings.wav_bit_depth) jobPatch.wav_bit_depth = settings.wav_bit_depth;
+        if (settings.mp3_bitrate) jobPatch.audio_bitrate = settings.mp3_bitrate;
+        if (settings.shifts !== undefined) jobPatch.shifts = Number(settings.shifts);
+        if (settings.overlap !== undefined) jobPatch.overlap = Number(settings.overlap);
+        if (settings.segment !== undefined) jobPatch.segment = Number(settings.segment);
+        if (settings.fp16_inference !== undefined) jobPatch.fp16_inference = Boolean(settings.fp16_inference);
+        if (settings.enable_loudness_normalize !== undefined) {
+          jobPatch.enable_loudness_normalize = Boolean(settings.enable_loudness_normalize);
+        }
+        if (settings.enable_spectral_denoise !== undefined) {
+          jobPatch.enable_spectral_denoise = Boolean(settings.enable_spectral_denoise);
+        }
+        if (settings.song_mode !== undefined) jobPatch.song_mode = Boolean(settings.song_mode);
+        if (Object.keys(jobPatch).length > 0) {
+          useJobsStore.setState((s) => ({ options: { ...s.options, ...jobPatch } }));
+        }
+
+        if (settings.output_format) {
+          useMixerStore.setState({ exportFormat: settings.output_format });
+        }
+        if (settings.mp3_bitrate) {
+          useMixerStore.setState({ exportBitrate: settings.mp3_bitrate });
         }
       }
 
