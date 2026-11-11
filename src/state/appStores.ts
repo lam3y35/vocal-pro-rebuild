@@ -16,7 +16,7 @@ import {
   WorkerHealth,
 } from "../bindings";
 import { SupportedLocale } from "../i18n/translations";
-import { invokeCommand, isTauriRuntime, toAssetUrl } from "../ipc";
+import { invokeCommand, invokeCommandStrict, isTauriRuntime, toAssetUrl } from "../ipc";
 
 // ---------------------------------------------------------------------------
 // 1. Jobs Store (Queue, Priority, Reorder, Pause/Resume, Multi-Job Tabs, Cancel)
@@ -928,19 +928,16 @@ export const useSystemStore = create<SystemState>((set, get) => ({
   systemBanner: null,
   showBanner: (msg) => set({ systemBanner: msg }),
   health: {
-    running: true,
-    worker_version: "3.0.0",
-    torch_version: "2.15.0",
-    cuda_available: true,
-    gpu_name: "NVIDIA GeForce RTX (CUDA / CPU Fallback Ready)",
-    vram_mb: 8192,
+    running: false,
+    worker_version: "",
+    torch_version: "",
+    cuda_available: false,
+    gpu_name: null,
+    vram_mb: null,
     restart_count: 0,
     max_concurrent_workers: 2,
     active_workers: 0,
-    slots: [
-      { slot_id: 0, pid: 14820, running: true, active_job_id: null },
-      { slot_id: 1, pid: 14824, running: true, active_job_id: null },
-    ],
+    slots: [],
   },
   hardwareProfile: {
     os_name: "Windows 11 / Linux x86_64",
@@ -1239,7 +1236,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
   },
   restartWorker: async () => {
     try {
-      const health = await invokeCommand<WorkerHealth>("restart_worker");
+      const health = await invokeCommandStrict<WorkerHealth>("restart_worker");
       if (health) {
         set({
           health,
@@ -1334,6 +1331,16 @@ export const useSystemStore = create<SystemState>((set, get) => ({
 
       if (health) {
         set({ health });
+        // The engine warms up in a background thread; poll until it reports ready (max ~90s).
+        if (!health.running && isTauriRuntime()) {
+          let tries = 0;
+          const timer = setInterval(async () => {
+            tries += 1;
+            const h = await invokeCommand<WorkerHealth>("worker_health");
+            if (h) set({ health: h });
+            if ((h && h.running) || tries >= 60) clearInterval(timer);
+          }, 1500);
+        }
       }
 
       if (models && Array.isArray(models) && models.length > 0) {

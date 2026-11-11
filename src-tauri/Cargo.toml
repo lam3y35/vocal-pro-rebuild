@@ -37,7 +37,7 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 dirs = "5.0"
 
 # Optional desktop hardware/webview crates (enabled in release/desktop builds)
-tauri = { version = "2.1", optional = true }
+tauri = { version = "2.1", optional = true, features = ["protocol-asset"] }
 cpal = { version = "0.15", optional = true }
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 rfd = "0.18.0"

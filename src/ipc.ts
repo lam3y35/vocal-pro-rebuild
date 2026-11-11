@@ -34,3 +34,17 @@ export async function invokeCommand<T>(
   }
   return null;
 }
+
+/** Like invokeCommand but propagates backend errors so callers can show the real message. */
+export async function invokeCommandStrict<T>(
+  cmd: string,
+  args: Record<string, unknown> = {}
+): Promise<T | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (err) {
+    console.error(`[Tauri IPC Error] ${cmd}:`, err);
+    throw new Error(typeof err === "string" ? err : (err as Error)?.message || String(err));
+  }
+}
