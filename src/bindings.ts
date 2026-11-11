@@ -175,6 +175,7 @@ export interface WorkerHealth {
   max_concurrent_workers?: number;
   active_workers?: number;
   slots?: WorkerSlotStatus[];
+  last_error?: string | null;
 }
 
 export type PerformanceProfileMode = "Auto" | "Eco" | "Balanced" | "Max Quality";

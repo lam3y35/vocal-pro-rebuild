@@ -33,6 +33,7 @@ pub struct WorkerHealth {
     pub active_workers: u32,
     pub queue_paused: bool,
     pub slots: Vec<WorkerSlotStatus>,
+    pub last_error: Option<String>,
 }
 
 struct WorkerProcessSlot {
@@ -110,6 +111,7 @@ impl WorkerSupervisor {
                 active_workers: 0,
                 queue_paused: false,
                 slots: Vec::new(),
+                last_error: None,
             },
             pending: HashMap::new(),
             logs: VecDeque::with_capacity(MAX_LOG_LINES),
@@ -203,10 +205,15 @@ impl WorkerSupervisor {
         }
 
         let mut child = cmd.spawn().map_err(|e| {
-            AppError::System(format!(
+            let msg = format!(
                 "Failed to spawn python worker slot {} ({:?}): {}",
                 slot_id, self.python_bin, e
-            ))
+            );
+            if let Ok(mut g) = self.inner.lock() {
+                g.health.running = false;
+                g.health.last_error = Some(msg.clone());
+            }
+            AppError::System(msg)
         })?;
 
         let pid = Some(child.id());
@@ -230,17 +237,27 @@ impl WorkerSupervisor {
             use std::io::Read;
             let mut err_msg = String::new();
             let _ = BufReader::new(stderr).read_to_string(&mut err_msg);
-            return Err(AppError::System(format!(
+            let msg = format!(
                 "Worker slot {} exited prematurely during startup: {}",
                 slot_id,
                 err_msg.trim()
-            )));
+            );
+            if let Ok(mut g) = self.inner.lock() {
+                g.health.running = false;
+                g.health.last_error = Some(msg.clone());
+            }
+            return Err(AppError::System(msg));
         }
         let initial_ev: WorkerEvent = serde_json::from_str(first_line.trim()).map_err(|e| {
-            AppError::System(format!(
+            let msg = format!(
                 "Invalid startup handshake from worker slot {} ({:?}): {}",
                 slot_id, first_line, e
-            ))
+            );
+            if let Ok(mut g) = self.inner.lock() {
+                g.health.running = false;
+                g.health.last_error = Some(msg.clone());
+            }
+            AppError::System(msg)
         })?;
 
         {
@@ -255,6 +272,7 @@ impl WorkerSupervisor {
             } = &initial_ev
             {
                 guard.health.running = true;
+                guard.health.last_error = None;
                 guard.health.worker_version = worker_version.clone();
                 guard.health.torch_version = torch_version.clone();
                 guard.health.cuda_available = *cuda_available;

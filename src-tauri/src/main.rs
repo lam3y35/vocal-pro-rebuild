@@ -101,6 +101,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .join("python.exe"),
                         parent.join(".venv").join("Scripts").join("python.exe"),
                         parent.join(".venv").join("bin").join("python"),
+                        parent
+                            .join("worker")
+                            .join(".venv")
+                            .join("Scripts")
+                            .join("python.exe"),
+                        parent
+                            .join("worker")
+                            .join(".venv")
+                            .join("bin")
+                            .join("python"),
+                        parent.join("../../../worker/.venv/bin/python"),
+                        parent.join("../../../worker/.venv/bin/python3"),
+                        parent.join("../../../worker/.venv/Scripts/python.exe"),
+                        parent.join("../../worker/.venv/bin/python"),
+                        parent.join("../../worker/.venv/Scripts/python.exe"),
                     ];
                     for c in candidates {
                         if c.exists() {
@@ -118,17 +133,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if app_data_py.exists() {
                 return app_data_py;
             }
+            // Check %LOCALAPPDATA%/VocalPro/engine/venv
+            if let Some(local_data) = dirs::data_local_dir() {
+                let local_py = local_data
+                    .join("VocalPro")
+                    .join("engine")
+                    .join("venv")
+                    .join("Scripts")
+                    .join("python.exe");
+                if local_py.exists() {
+                    return local_py;
+                }
+            }
             let cwd_candidates = [
                 PathBuf::from("worker/.venv/bin/python"),
                 PathBuf::from("worker/.venv/bin/python3"),
                 PathBuf::from("worker/.venv/Scripts/python.exe"),
+                PathBuf::from("../worker/.venv/bin/python"),
+                PathBuf::from("../worker/.venv/bin/python3"),
+                PathBuf::from("../worker/.venv/Scripts/python.exe"),
+                PathBuf::from("../../worker/.venv/bin/python"),
+                PathBuf::from("../../worker/.venv/Scripts/python.exe"),
                 PathBuf::from(".venv/bin/python"),
                 PathBuf::from(".venv/Scripts/python.exe"),
                 PathBuf::from("/home/antigravity/.venv/bin/python"),
             ];
             for c in cwd_candidates {
                 if c.exists() {
-                    return c;
+                    if c.is_absolute() {
+                        return c;
+                    } else if let Ok(cwd) = std::env::current_dir() {
+                        return cwd.join(c);
+                    } else {
+                        return c;
+                    }
                 }
             }
             if cfg!(windows) {
@@ -146,12 +184,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let candidates = [
                         parent.join("resources").join("worker"),
                         parent.join("worker"),
+                        parent.join("../../../worker"),
+                        parent.join("../../worker"),
+                        parent.join("../worker"),
                     ];
                     for c in candidates {
                         if c.exists() {
-                            return c;
+                            return c.canonicalize().unwrap_or(c);
                         }
                     }
+                }
+            }
+            let cwd_candidates = [
+                PathBuf::from("worker"),
+                PathBuf::from("../worker"),
+                PathBuf::from("../../worker"),
+            ];
+            for c in cwd_candidates {
+                if c.exists() {
+                    return c.canonicalize().unwrap_or(c);
                 }
             }
             PathBuf::from("worker")
@@ -167,6 +218,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "desktop-shell")]
     {
+        // Eagerly warm up AI worker in background so AI engine is ready when UI finishes loading
+        let ctx_warmup = ctx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = ctx_warmup.start_worker() {
+                eprintln!("[INFO] Worker engine warmup deferred: {}", e);
+            }
+        });
+
         use vocalpro_lib::commands::tauri_bridge::bridge;
         tauri::Builder::default()
             .manage(ctx)

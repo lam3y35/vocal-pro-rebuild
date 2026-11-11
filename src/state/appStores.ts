@@ -891,7 +891,7 @@ interface SystemState {
   importSettingsJson: (rawJson: string) => void;
   registerFileAssociations: () => void;
   createDesktopShortcut: () => void;
-  restartWorker: () => void;
+  restartWorker: () => Promise<void>;
   exportDiagnosticBundle: () => void;
   setShowChangelogModal: (v: boolean) => void;
   autoOptimizeForHardware: () => void;
@@ -1237,12 +1237,23 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       systemBanner: "Created Desktop Shortcut (VocalPro.lnk)",
     });
   },
-  restartWorker: () => {
-    void invokeCommand("restart_worker");
-    set((s) => ({
-      health: { ...s.health, running: true, restart_count: s.health.restart_count + 1 },
-      systemBanner: "Worker pool respawned cleanly over stdio JSON-Lines (handshake < 50 ms)",
-    }));
+  restartWorker: async () => {
+    try {
+      const health = await invokeCommand<WorkerHealth>("restart_worker");
+      if (health) {
+        set({
+          health,
+          systemBanner: health.running
+            ? `AI Engine Ready • PyTorch ${health.torch_version} (${health.cuda_available ? "CUDA" : "CPU"})`
+            : `AI Worker offline: ${health.last_error || "Check setup.bat"}`,
+        });
+      }
+    } catch (err: any) {
+      set((s) => ({
+        health: { ...s.health, running: false, last_error: String(err?.message || err) },
+        systemBanner: `AI Worker restart error: ${err?.message || err}`,
+      }));
+    }
   },
   exportDiagnosticBundle: () => {
     void invokeCommand("export_diagnostic_bundle");

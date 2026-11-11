@@ -125,7 +125,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeScreen, onSelectScreen }
           </div>
           <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
             <Cpu className="w-3 h-3 text-[#6C63FF] shrink-0" />
-            <span className="truncate">100% Offline • PyTorch {health.torch_version}</span>
+            <span className="truncate" title={health.last_error || undefined}>
+              {health.running
+                ? `100% Offline • PyTorch ${health.torch_version}`
+                : (health.last_error ? `Error: ${health.last_error.slice(0, 35)}...` : "Run Start-VocalPro.bat or setup.bat")}
+            </span>
           </div>
         </div>
 

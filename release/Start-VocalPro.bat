@@ -25,6 +25,13 @@ if %ENGINE_READY% equ 0 if exist ".venv\Scripts\python.exe" (
         set "ENGINE_READY=1"
     )
 )
+if %ENGINE_READY% equ 0 if exist "..\worker\.venv\Scripts\python.exe" (
+    "..\worker\.venv\Scripts\python.exe" -c "import torch, demucs; print('ready')" >nul 2>&1
+    if %ERRORLEVEL% equ 0 (
+        set "VENV_PY=%~dp0..\worker\.venv\Scripts\python.exe"
+        set "ENGINE_READY=1"
+    )
+)
 
 :: 2. Auto-setup if missing
 if %ENGINE_READY% equ 0 (

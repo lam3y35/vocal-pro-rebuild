@@ -34,18 +34,22 @@ if %ENGINE_READY% equ 0 (
     )
 )
 
-:: 2. If cargo is available, run native Tauri desktop shell in development
+:: Check if user explicitly requested dev mode
+if "%~1"=="--dev" goto RUN_DEV
+
+:: 2. Launch pre-compiled desktop release executable if present (instant startup)
+if exist "release\vocalpro.exe" (
+    echo [INFO] Starting VocalPro Desktop Application...
+    start "" "release\vocalpro.exe"
+    exit /b 0
+)
+
+:RUN_DEV
+:: 3. If cargo is available, run native Tauri desktop shell in development
 where cargo >nul 2>&1
 if %ERRORLEVEL% equ 0 (
     echo [INFO] Launching native Tauri v2 desktop application via Cargo...
     call npm run tauri dev
-    exit /b 0
-)
-
-:: 3. Launch release executable if present
-if exist "release\vocalpro.exe" (
-    echo [INFO] Starting VocalPro Desktop App...
-    start "" "release\vocalpro.exe"
     exit /b 0
 )
 
