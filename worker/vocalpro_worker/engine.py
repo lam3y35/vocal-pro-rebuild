@@ -56,11 +56,54 @@ class WorkerEngineError(Exception):
 
 
 def resolve_ffmpeg(custom_path: str = "") -> str:
-    """Resolve the ffmpeg binary path."""
+    """Resolve the ffmpeg binary path across custom settings, PATH, and adjacent directories."""
     if custom_path and Path(custom_path).is_file():
         return custom_path
+
+    env_ffmpeg = os.environ.get("VOCALPRO_FFMPEG")
+    if env_ffmpeg and Path(env_ffmpeg).is_file():
+        return env_ffmpeg
+
     found = shutil.which("ffmpeg")
-    return found or "ffmpeg"
+    if found:
+        return found
+
+    # Candidates adjacent to Python executable, venv, or app resources
+    exe_dir = Path(sys.executable).parent
+    cwd = Path.cwd()
+    candidates = [
+        exe_dir / "ffmpeg.exe",
+        exe_dir / "ffmpeg",
+        exe_dir.parent / "resources" / "ffmpeg.exe",
+        exe_dir.parent / "resources" / "ffmpeg",
+        cwd / "resources" / "ffmpeg.exe",
+        cwd / "resources" / "ffmpeg",
+        cwd / "ffmpeg.exe",
+        cwd / "ffmpeg",
+    ]
+
+    # Windows user directory fallbacks
+    if sys.platform.startswith("win"):
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / "VocalPro" / "engine" / "ffmpeg.exe")
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata:
+            candidates.append(Path(localappdata) / "Programs" / "ffmpeg" / "bin" / "ffmpeg.exe")
+            candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe")
+        candidates.append(Path("C:/ffmpeg/bin/ffmpeg.exe"))
+    else:
+        candidates.extend([
+            Path("/usr/bin/ffmpeg"),
+            Path("/usr/local/bin/ffmpeg"),
+            Path("/opt/homebrew/bin/ffmpeg"),
+        ])
+
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+
+    return "ffmpeg"
 
 
 def load_demucs_model(model_name: str, device: torch.device) -> Any:

@@ -757,3 +757,13 @@ def test_cinema_movie_export_targets_and_delete_original(tmp_path: Path, monkeyp
     assert any("clean" in f for f in files_both), "Clean movie exists"
     assert any(f.endswith(".mp3") for f in files_both), "Audio stem exists"
 
+
+def test_resolve_ffmpeg_fallback():
+    """Verify resolve_ffmpeg finds system or candidate ffmpeg."""
+    res = engine.resolve_ffmpeg()
+    assert res is not None and len(res) > 0
+    # Custom existing path takes precedence
+    fake_custom = sys.executable
+    assert engine.resolve_ffmpeg(fake_custom) == fake_custom
+
+

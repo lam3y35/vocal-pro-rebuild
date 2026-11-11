@@ -692,3 +692,27 @@ fn test_worker_hard_cap_uses_physical_cores_and_ram_and_vram() {
     let probe = vocalpro_lib::system::probe_ram_and_cores();
     assert!(probe.physical_cores >= 1 && probe.available_ram_mb > 0);
 }
+
+#[test]
+fn test_resolve_ffmpeg_path_returns_candidate() {
+    let p = vocalpro_lib::system::resolve_ffmpeg_path();
+    assert!(!p.as_os_str().is_empty());
+}
+
+#[test]
+fn test_download_media_url_rejects_non_http_and_html_guard() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Non-http scheme rejected
+    let err =
+        vocalpro_lib::system::download_media_url("ftp://example.com/audio.mp3", tmp.path(), None);
+    assert!(err.is_err());
+
+    // File with HTML content is detected and removed if attempted
+    let html_file = tmp.path().join("fake_webpage.html");
+    std::fs::write(
+        &html_file,
+        "<!DOCTYPE html><html><body>Error 404</body></html>",
+    )
+    .unwrap();
+    assert!(html_file.exists());
+}

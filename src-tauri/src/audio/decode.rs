@@ -153,7 +153,8 @@ fn decode_with_symphonia(path: &Path) -> AppResult<DecodedAudio> {
 
 fn decode_with_ffmpeg_fallback(path: &Path) -> AppResult<DecodedAudio> {
     let tmp_wav = std::env::temp_dir().join(format!("vocalpro_dec_{}.wav", uuid::Uuid::new_v4()));
-    let status = Command::new("ffmpeg")
+    let ffmpeg_bin = crate::system::resolve_ffmpeg_path();
+    let status = Command::new(&ffmpeg_bin)
         .args([
             "-y",
             "-i",

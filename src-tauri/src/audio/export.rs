@@ -58,8 +58,9 @@ pub fn write_encoded_audio(
         std::fs::create_dir_all(parent)?;
     }
 
+    let ffmpeg_bin = crate::system::resolve_ffmpeg_path();
     let status = if fmt == "mp3" {
-        Command::new("ffmpeg")
+        Command::new(&ffmpeg_bin)
             .args([
                 "-y",
                 "-i",
@@ -74,7 +75,7 @@ pub fn write_encoded_audio(
             .stderr(std::process::Stdio::null())
             .status()
     } else if fmt == "flac" {
-        Command::new("ffmpeg")
+        Command::new(&ffmpeg_bin)
             .args([
                 "-y",
                 "-i",

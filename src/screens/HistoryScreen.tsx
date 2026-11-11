@@ -1,9 +1,15 @@
 import React, { useState } from "react";
-import { CheckCircle2, Download, FolderOpen, History, Search, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, Download, FolderOpen, History, Search, Sliders, Trash2, XCircle } from "lucide-react";
+import { ScreenId } from "../components/Sidebar";
 import { invokeCommand } from "../ipc";
 import { useLibraryStore } from "../state/appStores";
 
-export const HistoryScreen: React.FC = () => {
+interface HistoryScreenProps {
+  onNavigate?: (screen: ScreenId) => void;
+}
+
+export const HistoryScreen: React.FC<HistoryScreenProps> = ({ onNavigate }) => {
+  const openFolderInMixer = useLibraryStore((s) => s.openFolderInMixer);
   const separationHistory = useLibraryStore((s) => s.separationHistory);
   const clearSeparationHistory = useLibraryStore((s) => s.clearSeparationHistory);
   const downloadHistory = useLibraryStore((s) => s.downloadHistory);
@@ -120,6 +126,23 @@ export const HistoryScreen: React.FC = () => {
                       >
                         <FolderOpen className="w-3.5 h-3.5" />
                         <span>Open Folder</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (item.output_dir) {
+                            await openFolderInMixer(
+                              item.output_dir,
+                              item.files.map((f) => f.split(/[\\/]/).pop()).join(", "),
+                              item.model
+                            );
+                            onNavigate?.("results");
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#6C63FF]/20 border border-[#6C63FF]/40 hover:bg-[#6C63FF] text-[#6C63FF] hover:text-white text-[11px] font-bold transition shrink-0 shadow-sm"
+                      >
+                        <Sliders className="w-3.5 h-3.5" />
+                        <span>Open in Mixer</span>
                       </button>
                     </div>
                   )}

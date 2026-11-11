@@ -8,6 +8,7 @@ import {
   JobOptions,
   JobPriority,
   JobRecord,
+  MixerSnapshot,
   ModelInfo,
   OutputFolderEntry,
   PerformanceProfileMode,
@@ -469,7 +470,22 @@ export const useMixerStore = create<MixerState>((set, get) => ({
     stopAllAudio();
     stemAudioMap.clear();
 
-    const newStems = entry.stems.map((s) => ({
+    const AUDIO_STEM_EXTS = [".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".aif", ".aiff"];
+    const isAudioStem = (s: { name: string; path: string }) => {
+      const lower = s.path.toLowerCase();
+      const isVideo =
+        lower.endsWith(".mp4") ||
+        lower.endsWith(".mkv") ||
+        lower.endsWith(".mov") ||
+        lower.endsWith(".webm") ||
+        lower.endsWith(".avi");
+      if (isVideo || s.name.toLowerCase().startsWith("video_")) {
+        return false;
+      }
+      return AUDIO_STEM_EXTS.some((ext) => lower.endsWith(ext));
+    };
+
+    const newStems = entry.stems.filter(isAudioStem).map((s) => ({
       name: s.name,
       path: s.path,
       gain: 1.0,
@@ -697,6 +713,7 @@ interface LibraryState {
   downloadHistory: DownloadHistoryEntry[];
   presets: { name: string; options: JobOptions }[];
   selectOutput: (id: string) => void;
+  openFolderInMixer: (folderPath: string, sourceName?: string, model?: string) => Promise<void>;
   addCompletedOutput: (entry: OutputFolderEntry) => void;
   runAnalysisForFolder: (folderPath: string) => void;
   addSeparationHistory: (entry: SeparationHistoryEntry) => void;
@@ -767,6 +784,42 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     set({ selectedOutputId: id });
     if (found) {
       useMixerStore.getState().loadFolderStems(found);
+    }
+  },
+  openFolderInMixer: async (folderPath, sourceName, model) => {
+    const outputs = get().outputs;
+    const existing = outputs.find((o) => o.folder_path === folderPath);
+    if (existing) {
+      get().selectOutput(existing.id);
+      return;
+    }
+    try {
+      const snap = await invokeCommandStrict<MixerSnapshot>("mixer_load_folder", { folderPath });
+      if (snap && snap.stems && snap.stems.length > 0) {
+        const folderName = folderPath.split(/[\\/]/).pop() || "Separation";
+        const entry: OutputFolderEntry = {
+          id: `hist_${Date.now()}`,
+          folder_name: folderName,
+          folder_path: folderPath,
+          source_filename: sourceName || folderName,
+          model: model || "htdemucs",
+          stems: snap.stems.map((s) => ({
+            name: s.name,
+            path: s.path,
+            duration_s: s.duration_s,
+            sample_rate: snap.sample_rate,
+            channels: snap.channels,
+          })),
+          bpm: null,
+          musical_key: null,
+          musical_scale: null,
+          duration_s: snap.total_frames / (snap.sample_rate || 44100),
+          created_at: new Date().toISOString(),
+        };
+        get().addCompletedOutput(entry);
+      }
+    } catch (e) {
+      console.warn("Failed to load folder into mixer:", e);
     }
   },
   addCompletedOutput: (entry) => {

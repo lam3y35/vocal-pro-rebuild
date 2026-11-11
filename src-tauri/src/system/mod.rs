@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -871,6 +871,101 @@ pub fn fetch_webpage_title(url: &str) -> Option<String> {
     None
 }
 
+pub fn resolve_ffmpeg_path() -> PathBuf {
+    if let Ok(custom) = std::env::var("VOCALPRO_FFMPEG") {
+        let p = PathBuf::from(custom);
+        if p.is_file() {
+            return p;
+        }
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            let candidates = [
+                exe_dir.join("ffmpeg.exe"),
+                exe_dir.join("ffmpeg"),
+                exe_dir.join("resources").join("ffmpeg.exe"),
+                exe_dir.join("resources").join("ffmpeg"),
+                exe_dir.join("bin").join("ffmpeg.exe"),
+                exe_dir.join("bin").join("ffmpeg"),
+            ];
+            for c in candidates {
+                if c.is_file() {
+                    return c;
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let p = PathBuf::from(appdata)
+                .join("VocalPro")
+                .join("engine")
+                .join("ffmpeg.exe");
+            if p.is_file() {
+                return p;
+            }
+        }
+        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+            let p1 = PathBuf::from(&localappdata)
+                .join("Programs")
+                .join("ffmpeg")
+                .join("bin")
+                .join("ffmpeg.exe");
+            if p1.is_file() {
+                return p1;
+            }
+            let p2 = PathBuf::from(&localappdata)
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Links")
+                .join("ffmpeg.exe");
+            if p2.is_file() {
+                return p2;
+            }
+        }
+        let c_ffmpeg = PathBuf::from("C:\\ffmpeg\\bin\\ffmpeg.exe");
+        if c_ffmpeg.is_file() {
+            return c_ffmpeg;
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        for p in [
+            "/usr/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+        ] {
+            let pb = PathBuf::from(p);
+            if pb.is_file() {
+                return pb;
+            }
+        }
+    }
+
+    PathBuf::from("ffmpeg")
+}
+
+fn is_html_or_text_payload(path: &Path, content_type: &str) -> bool {
+    let ct = content_type.to_lowercase();
+    if ct.contains("text/html") || ct.contains("application/xhtml+xml") {
+        return true;
+    }
+    if let Ok(mut f) = File::open(path) {
+        let mut buf = [0u8; 512];
+        if let Ok(n) = f.read(&mut buf) {
+            let s = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            if s.contains("<!doctype html") || s.contains("<html") || s.contains("<head") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn download_media_url(
     url: &str,
     downloads_dir: &Path,
@@ -923,6 +1018,17 @@ pub fn download_media_url(
         false
     };
 
+    // If server responded with an explicit HTML document, fail immediately
+    let ct_lower = content_type.to_lowercase();
+    if ct_lower.contains("text/html") || ct_lower.contains("application/xhtml+xml") {
+        if !detected_filename.is_empty() {
+            let _ = std::fs::remove_file(downloads_dir.join(&detected_filename));
+        }
+        return Err(AppError::InvalidInput(
+            "The URL returned an HTML webpage instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
+        ));
+    }
+
     let default_ext = if content_type.contains("video/mp4") {
         "mp4"
     } else if content_type.contains("video/") || content_type.contains("matroska") {
@@ -974,6 +1080,13 @@ pub fn download_media_url(
             )));
         }
 
+        if is_html_or_text_payload(&fallback_path, &content_type) {
+            let _ = std::fs::remove_file(&fallback_path);
+            return Err(AppError::InvalidInput(
+                "The URL returned an HTML webpage instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
+            ));
+        }
+
         let ext = fallback_path
             .extension()
             .and_then(|e| e.to_str())
@@ -985,6 +1098,13 @@ pub fn download_media_url(
 
     // Curl succeeded with -O -J: check if detected filename is generic and can be improved
     let downloaded_path = downloads_dir.join(&detected_filename);
+    if is_html_or_text_payload(&downloaded_path, &content_type) {
+        let _ = std::fs::remove_file(&downloaded_path);
+        return Err(AppError::InvalidInput(
+            "The URL returned an HTML webpage instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
+        ));
+    }
+
     let is_generic = {
         let stem = downloaded_path
             .file_stem()
@@ -1039,6 +1159,13 @@ pub fn download_media_url(
     } else {
         (detected_filename, downloaded_path)
     };
+
+    if is_html_or_text_payload(&final_path, &content_type) {
+        let _ = std::fs::remove_file(&final_path);
+        return Err(AppError::InvalidInput(
+            "The URL returned an HTML webpage instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
+        ));
+    }
 
     let ext = final_path
         .extension()

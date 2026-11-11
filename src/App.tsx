@@ -148,7 +148,7 @@ export const App: React.FC = () => {
           {activeScreen === "home" && <HomeScreen onNavigate={setActiveScreen} />}
           {activeScreen === "separate" && <SeparationScreen />}
           {activeScreen === "results" && <ResultsScreen />}
-          {activeScreen === "history" && <HistoryScreen />}
+          {activeScreen === "history" && <HistoryScreen onNavigate={setActiveScreen} />}
           {activeScreen === "settings" && <SettingsScreen />}
         </div>
       </main>
