@@ -15,20 +15,35 @@ pub fn compute_waveform_from_decoded(
     decoded: &DecodedAudio,
     num_buckets: usize,
 ) -> WaveformSummary {
-    let mono = decoded.to_mono();
     let target = num_buckets.max(1);
+    let ch = decoded.channels.max(1);
+    let total_frames = decoded.frames;
 
-    let mut raw_peaks: Vec<f32> = if mono.len() > target {
-        let step = mono.len() / target;
-        (0..target)
-            .map(|i| {
-                let slice = &mono[i * step..(i + 1) * step];
-                slice.iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()))
-            })
-            .collect()
+    let mut raw_peaks: Vec<f32> = Vec::with_capacity(target);
+    if total_frames > target {
+        let step = total_frames / target;
+        for i in 0..target {
+            let start_frame = i * step;
+            let end_frame = (i + 1) * step;
+            let start_sample = start_frame * ch;
+            let end_sample = (end_frame * ch).min(decoded.samples_interleaved.len());
+            let slice = &decoded.samples_interleaved[start_sample..end_sample];
+            let mut peak = 0.0_f32;
+            for frame_chunk in slice.chunks_exact(ch) {
+                let mono_val: f32 = frame_chunk.iter().copied().sum::<f32>() / ch as f32;
+                let abs = mono_val.abs();
+                if abs > peak {
+                    peak = abs;
+                }
+            }
+            raw_peaks.push(peak);
+        }
     } else {
-        mono.iter().map(|&x| x.abs()).collect()
-    };
+        for frame_chunk in decoded.samples_interleaved.chunks_exact(ch) {
+            let mono_val: f32 = frame_chunk.iter().copied().sum::<f32>() / ch as f32;
+            raw_peaks.push(mono_val.abs());
+        }
+    }
 
     let max_val = raw_peaks.iter().copied().fold(0.0_f32, f32::max);
     if max_val > 0.0 {

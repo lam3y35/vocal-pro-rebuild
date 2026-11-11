@@ -481,7 +481,7 @@ pub fn discover_stems_in_folder(folder_path: &Path) -> AppResult<Vec<(String, Pa
         "karaoke",
         "background",
     ];
-    let valid_exts = ["wav", "mp3", "flac", "ogg"];
+    let valid_exts = ["wav", "mp3", "flac", "ogg", "aac", "m4a"];
     let mut found: Vec<(String, PathBuf)> = Vec::new();
 
     let mut entries: Vec<_> = std::fs::read_dir(folder_path)?

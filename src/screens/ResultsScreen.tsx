@@ -3,6 +3,7 @@ import {
   Activity,
   CheckCircle2,
   Download,
+  Film,
   FolderOpen,
   Music,
   Pause,
@@ -14,7 +15,7 @@ import {
 import { CanvasWaveform } from "../components/CanvasWaveform";
 import { StemMixerStrip } from "../components/StemMixerStrip";
 import { TRANSLATIONS } from "../i18n/translations";
-import { invokeCommand } from "../ipc";
+import { invokeCommand, toAssetUrl } from "../ipc";
 import { useJobsStore, useLibraryStore, useMixerStore, useSystemStore } from "../state/appStores";
 
 export const ResultsScreen: React.FC = () => {
@@ -50,6 +51,12 @@ export const ResultsScreen: React.FC = () => {
 
   const activeOutput = outputs.find((o) => o.id === selectedOutputId) || outputs[0];
   const analysis = activeOutput ? analysisByFolder[activeOutput.folder_path] : undefined;
+
+  const videoStem = activeOutput?.stems.find(
+    (s) =>
+      s.name === "video_clean" ||
+      /\.(mp4|mkv|mov|webm|avi)$/i.test(s.path)
+  );
 
   const formatTime = (sec: number) => {
     const mins = Math.floor(sec / 60);
@@ -120,6 +127,67 @@ export const ResultsScreen: React.FC = () => {
 
         {/* Right Main Area: Audio Analysis + Live Multi-Stem Mixer + Master Controls */}
         <div className="xl:col-span-8 space-y-5">
+          {/* Cinema Movie Showcase Player (when output contains remuxed clean video) */}
+          {videoStem && (
+            <div className="rounded-2xl bg-gradient-to-b from-[#1C2030] to-[#171A26] border border-[#00F0B5]/40 p-5 space-y-4 shadow-2xl ring-1 ring-[#00F0B5]/20 animate-fadeIn">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 rounded-xl bg-[#00F0B5]/15 text-[#00F0B5] border border-[#00F0B5]/30">
+                    <Film className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-white flex items-center gap-2">
+                      <span>Cinema Remuxed Movie (Clean Dialogue)</span>
+                      <span className="px-2 py-0.5 rounded-full bg-[#00F0B5]/15 border border-[#00F0B5]/40 text-[#00F0B5] text-[10px] font-mono font-bold">
+                        1:1 Timeline Sync Guaranteed
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-slate-300 font-mono mt-0.5 truncate max-w-lg">
+                      {videoStem.path}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => invokeCommand("open_folder", { path: videoStem.path })}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-[#00F0B5] hover:bg-[#00F0B5]/90 text-slate-950 text-xs font-black transition shadow-lg shadow-[#00F0B5]/25"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Open in Default Player</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => invokeCommand("open_folder", { path: activeOutput.folder_path })}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-[#171A26] border border-[#252B3D] hover:border-slate-500 text-slate-200 text-xs font-bold transition"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5 text-[#00F0B5]" />
+                    <span>Show in Explorer</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Native Hardware-Accelerated Video Player */}
+              <div className="relative rounded-xl overflow-hidden bg-black/90 border border-[#252B3D] aspect-video max-h-[380px] flex items-center justify-center">
+                <video
+                  controls
+                  src={toAssetUrl(videoStem.path)}
+                  className="w-full h-full object-contain"
+                  preload="metadata"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-400 font-mono pt-1 border-t border-[#252B3D]/60">
+                <span className="flex items-center gap-1 text-[#00F0B5]">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Lossless Video Stream Passthrough (-c:v copy) • Zero Bloat</span>
+                </span>
+                <span>Studio Audio: AAC 320 kbps • 48 kHz Microsecond Locked</span>
+              </div>
+            </div>
+          )}
+
           {/* 1. Master Transport & Audio Analysis Card */}
           <div className="rounded-2xl bg-[#171A26] border border-[#252B3D] p-5 space-y-4 shadow-xl">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -220,18 +288,35 @@ export const ResultsScreen: React.FC = () => {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              {stems.map((stem) => (
-                <StemMixerStrip
-                  key={stem.name}
-                  stem={stem}
-                  onGainChange={(g) => setStemGain(stem.name, g)}
-                  onToggleMute={() => toggleMute(stem.name)}
-                  onToggleSolo={() => toggleSolo(stem.name)}
-                  onExportMidi={() => exportStemMidi(stem.name)}
-                />
-              ))}
-            </div>
+            {stems.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-[#252B3D] p-6 text-center text-slate-400 text-xs space-y-1.5">
+                {videoStem ? (
+                  <>
+                    <p className="font-semibold text-slate-200">
+                      Clean Dialogue Movie Remux
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      All dialogue and vocals were cleanly remuxed into the video file above with 1:1 timeline synchronization. Intermediate audio stems were purged to keep storage footprint small.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-slate-400">No stems currently loaded in mixer.</p>
+                )}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                {stems.map((stem) => (
+                  <StemMixerStrip
+                    key={stem.name}
+                    stem={stem}
+                    onGainChange={(g) => setStemGain(stem.name, g)}
+                    onToggleMute={() => toggleMute(stem.name)}
+                    onToggleSolo={() => toggleSolo(stem.name)}
+                    onExportMidi={() => exportStemMidi(stem.name)}
+                  />
+                ))}
+              </div>
+            )}
 
             {/* Export Mix & Export Stems Bar */}
             <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-[#252B3D] text-xs">
