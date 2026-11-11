@@ -72,5 +72,5 @@ jobs:
           name: VocalPro v3.0.0 Windows All-in-One
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
 
