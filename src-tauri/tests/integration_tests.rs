@@ -21,7 +21,10 @@ fn python_bin() -> PathBuf {
     let candidates = [
         worker_dir().join(".venv").join("bin").join("python"),
         worker_dir().join(".venv").join("bin").join("python3"),
-        worker_dir().join(".venv").join("Scripts").join("python.exe"),
+        worker_dir()
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe"),
         PathBuf::from("/home/antigravity/.venv/bin/python"),
     ];
     for c in candidates {
@@ -52,7 +55,11 @@ fn ensure_ref_wav(name: &str) -> PathBuf {
         if let Some(parent) = p.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let sr = if name.contains("48k") { 48000_u32 } else { 44100_u32 };
+        let sr = if name.contains("48k") {
+            48000_u32
+        } else {
+            44100_u32
+        };
         let channels = if name.contains("mono") { 1_u16 } else { 2_u16 };
         let frames = (sr as usize) * 4;
         let mut samples = vec![0.0_f32; frames * (channels as usize)];
@@ -143,7 +150,7 @@ fn test_legacy_migration_imports_all_files_and_deduplicates_outputs() {
         .migrate_legacy(
             &app_data,
             std::slice::from_ref(&extra_cfg),
-            &[out_root.clone()],
+            std::slice::from_ref(&out_root),
         )
         .unwrap();
     assert!(!rep1.already_migrated);
@@ -440,11 +447,13 @@ async fn test_worker_supervisor_end_to_end_separation_and_sub_500ms_cancel() {
     let ref_wav = ensure_ref_wav("track_01_pop_stereo_44k.wav");
     let out_dir = tmp.path().join("out_sep");
 
-    let mut opts = JobOptions::default();
-    opts.model = "htdemucs_6s".to_string();
-    opts.output_mode = "all_stems".to_string();
-    opts.output_all_stems = true;
-    opts.shifts = 0;
+    let opts = JobOptions {
+        model: "htdemucs_6s".to_string(),
+        output_mode: "all_stems".to_string(),
+        output_all_stems: true,
+        shifts: 0,
+        ..JobOptions::default()
+    };
 
     let job_rec = ctx
         .submit_separation_job(
@@ -505,9 +514,11 @@ async fn test_multi_process_parallel_batch_and_sigkill_crash_isolation() {
     let ref2 = ensure_ref_wav("track_02_mono_48k.wav");
     let out_dir = tmp.path().join("out_batch");
 
-    let mut opts = JobOptions::default();
-    opts.model = "htdemucs".to_string();
-    opts.shifts = 1;
+    let opts = JobOptions {
+        model: "htdemucs".to_string(),
+        shifts: 1,
+        ..JobOptions::default()
+    };
 
     let results = ctx
         .submit_batch_separations(

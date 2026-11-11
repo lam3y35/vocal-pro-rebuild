@@ -251,7 +251,8 @@ pub mod bridge {
         url: String,
         custom_name: Option<String>,
     ) -> Result<DownloadHistoryEntry, String> {
-        ctx.download_url(&url, custom_name.as_deref()).map_err(|e| e.to_string())
+        ctx.download_url(&url, custom_name.as_deref())
+            .map_err(|e| e.to_string())
     }
 
     #[tauri::command]

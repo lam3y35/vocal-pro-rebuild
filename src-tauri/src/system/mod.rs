@@ -706,7 +706,9 @@ pub fn percent_decode_url(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(val) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+            if let Ok(val) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 result.push(val);
                 i += 3;
                 continue;
@@ -745,7 +747,19 @@ pub fn extract_query_filename(url: &str) -> Option<String> {
                 let key_low = key.to_lowercase();
                 if matches!(
                     key_low.as_str(),
-                    "filename" | "file" | "title" | "name" | "track" | "movie" | "film" | "video" | "media" | "song" | "q" | "v" | "item"
+                    "filename"
+                        | "file"
+                        | "title"
+                        | "name"
+                        | "track"
+                        | "movie"
+                        | "film"
+                        | "video"
+                        | "media"
+                        | "song"
+                        | "q"
+                        | "v"
+                        | "item"
                 ) {
                     let decoded = percent_decode_url(val);
                     let trimmed = decoded.trim().to_string();
@@ -757,7 +771,15 @@ pub fn extract_query_filename(url: &str) -> Option<String> {
                     if !trimmed.is_empty()
                         && !matches!(
                             stem.as_str(),
-                            "stream" | "download" | "audio" | "video" | "get" | "watch" | "media" | "play" | "file"
+                            "stream"
+                                | "download"
+                                | "audio"
+                                | "video"
+                                | "get"
+                                | "watch"
+                                | "media"
+                                | "play"
+                                | "file"
                         )
                         && !stem.chars().all(|c| c.is_ascii_digit())
                     {
@@ -785,7 +807,22 @@ pub fn extract_path_filename(url: &str) -> Option<String> {
         if !trimmed.is_empty()
             && !matches!(
                 stem.as_str(),
-                "stream" | "download" | "audio" | "video" | "get" | "watch" | "media" | "play" | "file" | "master" | "index" | "playlist" | "manifest" | "hls" | "dash" | "output"
+                "stream"
+                    | "download"
+                    | "audio"
+                    | "video"
+                    | "get"
+                    | "watch"
+                    | "media"
+                    | "play"
+                    | "file"
+                    | "master"
+                    | "index"
+                    | "playlist"
+                    | "manifest"
+                    | "hls"
+                    | "dash"
+                    | "output"
             )
             && !stem.chars().all(|c| c.is_ascii_digit())
         {
@@ -901,7 +938,10 @@ pub fn download_media_url(
     };
 
     // If curl failed with -O -J (e.g. server refused remote header name), fallback to direct write
-    if !curl_success || detected_filename.is_empty() || !downloads_dir.join(&detected_filename).is_file() {
+    if !curl_success
+        || detected_filename.is_empty()
+        || !downloads_dir.join(&detected_filename).is_file()
+    {
         let fallback_name = custom_name
             .map(|s| s.to_string())
             .or_else(|| extract_query_filename(url))
@@ -916,12 +956,22 @@ pub fn download_media_url(
         let fallback_path = downloads_dir.join(&sanitized);
 
         let status = Command::new("curl")
-            .args(["-L", "-s", "-f", "-o", &fallback_path.to_string_lossy(), url])
+            .args([
+                "-L",
+                "-s",
+                "-f",
+                "-o",
+                &fallback_path.to_string_lossy(),
+                url,
+            ])
             .status()
             .map_err(|e| AppError::System(format!("Failed to invoke curl: {}", e)))?;
 
         if !status.success() || !fallback_path.is_file() {
-            return Err(AppError::System(format!("Failed to download media from URL: {}", url)));
+            return Err(AppError::System(format!(
+                "Failed to download media from URL: {}",
+                url
+            )));
         }
 
         let ext = fallback_path
@@ -941,8 +991,20 @@ pub fn download_media_url(
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase();
-        matches!(stem.as_str(), "stream" | "download" | "audio" | "video" | "get" | "watch" | "media" | "play" | "file" | "downloaded_media" | "")
-            || stem.chars().all(|c| c.is_ascii_digit())
+        matches!(
+            stem.as_str(),
+            "stream"
+                | "download"
+                | "audio"
+                | "video"
+                | "get"
+                | "watch"
+                | "media"
+                | "play"
+                | "file"
+                | "downloaded_media"
+                | ""
+        ) || stem.chars().all(|c| c.is_ascii_digit())
     };
 
     let better_name = if let Some(cn) = custom_name.filter(|s| !s.trim().is_empty()) {

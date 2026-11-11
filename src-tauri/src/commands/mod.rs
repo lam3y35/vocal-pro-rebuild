@@ -140,7 +140,12 @@ impl AppContext {
 
         let ev = self
             .worker
-            .submit_separation(job_id.clone(), input_path.clone(), effective_output_dir, options)
+            .submit_separation(
+                job_id.clone(),
+                input_path.clone(),
+                effective_output_dir,
+                options,
+            )
             .await?;
 
         match ev {
@@ -460,7 +465,11 @@ impl AppContext {
         self.db.clear_download_history()
     }
 
-    pub fn download_url(&self, url: &str, custom_name: Option<&str>) -> AppResult<DownloadHistoryEntry> {
+    pub fn download_url(
+        &self,
+        url: &str,
+        custom_name: Option<&str>,
+    ) -> AppResult<DownloadHistoryEntry> {
         let downloads_dir = dirs::audio_dir()
             .map(|p| p.join("VocalPro/Downloads"))
             .or_else(|| dirs::download_dir().map(|d| d.join("VocalPro Downloads")))
