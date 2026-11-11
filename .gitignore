@@ -22,3 +22,11 @@ benchmarks/golden/*.mid
 # real CC audio is fetched, not committed
 benchmarks/reference-real/*.wav
 benchmarks/reference-real/*_source.*
+
+# Multi-agent Teamwork runtime directory
+.agents/
+
+# Large binary installers (>100MB, hosted on GitHub Releases)
+release/*-Setup.exe
+release/setup/
+
