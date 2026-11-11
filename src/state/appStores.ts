@@ -309,16 +309,32 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       const records = await promise;
       clearInterval(pollTimer);
 
-      if (records && Array.isArray(records) && records.length > 0) {
-        set((s) => {
-          const recMap = new Map(records.map((r) => [r.input_path, r]));
-          return {
-            jobs: s.jobs.map((j) => {
-              const realRec = recMap.get(j.input_path);
-              return realRec ? { ...j, ...realRec, status: "done", percent: 100 } : j;
-            }),
-          };
-        });
+      if (!records || !Array.isArray(records) || records.length === 0) {
+        set((s) => ({
+          jobs: s.jobs.map((j) =>
+            newJobs.some((nj) => nj.job_id === j.job_id)
+              ? {
+                  ...j,
+                  status: "failed",
+                  error_message: !isTauriRuntime()
+                    ? "Running in web browser preview. For real AI stem separation, launch the native desktop app via run.bat."
+                    : "Separation worker did not produce stem files. Please run setup.bat to verify the PyTorch AI engine.",
+                }
+              : j
+          ),
+        }));
+        return;
+      }
+
+      set((s) => {
+        const recMap = new Map(records.map((r) => [r.input_path, r]));
+        return {
+          jobs: s.jobs.map((j) => {
+            const realRec = recMap.get(j.input_path);
+            return realRec ? { ...j, ...realRec, status: "done", percent: 100 } : j;
+          }),
+        };
+      });
 
         // Refresh outputs & history directly from SQLite
         const [outs, hists] = await Promise.all([
@@ -346,7 +362,6 @@ export const useJobsStore = create<JobsState>((set, get) => ({
             void invokeCommand("open_folder", { path: rec.output_dir });
           }
         }
-      }
     } catch (err: any) {
       appendLog(`[batch_error] Failed separation batch: ${err?.message || err}`);
       set((s) => ({

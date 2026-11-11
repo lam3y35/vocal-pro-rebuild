@@ -39,7 +39,7 @@ if not exist "%VENV_PY%" (
 
 echo [2/4] Installing PyTorch Demucs and audio processing dependencies...
 "%VENV_PY%" -m pip install --upgrade pip --quiet
-"%VENV_PY%" -m pip install torch demucs soundfile numpy scipy librosa mido resampy platformdirs --quiet
+"%VENV_PY%" -m pip install torch torchaudio demucs soundfile numpy scipy librosa noisereduce mido resampy platformdirs --quiet
 
 echo [3/4] Installing UI dependencies...
 where npm >nul 2>&1

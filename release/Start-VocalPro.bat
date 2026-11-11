@@ -55,7 +55,7 @@ if %ENGINE_READY% equ 0 (
 
     echo [2/3] Installing PyTorch Demucs and audio processing dependencies...
     "%VENV_PY%" -m pip install --upgrade pip --quiet
-    "%VENV_PY%" -m pip install torch demucs soundfile numpy scipy librosa mido resampy platformdirs --quiet
+    "%VENV_PY%" -m pip install torch torchaudio demucs soundfile numpy scipy librosa noisereduce mido resampy platformdirs --quiet
 
     echo [3/3] Verifying AI engine installation...
     "%VENV_PY%" -c "import torch, demucs; print('[SUCCESS] Engine verified!')"
