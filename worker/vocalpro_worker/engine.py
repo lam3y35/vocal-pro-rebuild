@@ -63,8 +63,11 @@ def resolve_ffmpeg(custom_path: str = "") -> str:
         return custom_path
 
     env_ffmpeg = os.environ.get("VOCALPRO_FFMPEG")
-    if env_ffmpeg and Path(env_ffmpeg).is_file():
-        return env_ffmpeg
+    if env_ffmpeg is not None:
+        if env_ffmpeg.strip() and Path(env_ffmpeg).is_file():
+            return env_ffmpeg
+        if env_ffmpeg.strip().lower() in ("none", "disabled", "false", "0") or not Path(env_ffmpeg).exists():
+            return ""
 
     found = shutil.which("ffmpeg")
     if found:

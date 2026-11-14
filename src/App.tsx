@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Cpu, FolderOpen, FolderOutput, Moon, Sparkles, Sun, Wand2, X, Zap } from "lucide-react";
+import { AlertCircle, AlertTriangle, CheckCircle2, Cpu, FolderOpen, FolderOutput, Moon, Sparkles, Sun, Wand2, X, Zap } from "lucide-react";
 import { PerformanceProfileMode } from "./bindings";
 import { ScreenId, Sidebar } from "./components/Sidebar";
 import { invokeCommand } from "./ipc";
@@ -137,13 +137,37 @@ export const App: React.FC = () => {
         </header>
 
         {systemBanner && (
-          <div className="bg-[#00F0B5]/15 border-b border-[#00F0B5]/40 px-6 py-2.5 text-xs font-mono text-[#00F0B5] flex items-center justify-between animate-fadeIn">
+          <div
+            role="alert"
+            data-testid="system-banner"
+            className={`border-b px-6 py-2.5 text-xs font-mono flex items-center justify-between animate-fadeIn transition-colors ${
+              systemBanner.type === "error"
+                ? "bg-[#FF4D6D]/15 border-[#FF4D6D]/50 text-[#FF4D6D]"
+                : systemBanner.type === "warning"
+                ? "bg-[#FFB020]/15 border-[#FFB020]/50 text-[#FFB020]"
+                : systemBanner.type === "success"
+                ? "bg-[#00F0B5]/15 border-[#00F0B5]/50 text-[#00F0B5]"
+                : "bg-[#6C63FF]/15 border-[#6C63FF]/50 text-[#8B85FF]"
+            }`}
+          >
             <div className="flex items-center gap-2">
-              <Zap className="w-4 h-4 shrink-0 text-[#00F0B5]" />
-              <span>{systemBanner}</span>
+              {systemBanner.type === "error" && (
+                <AlertCircle className="w-4 h-4 shrink-0 text-[#FF4D6D]" />
+              )}
+              {systemBanner.type === "warning" && (
+                <AlertTriangle className="w-4 h-4 shrink-0 text-[#FFB020]" />
+              )}
+              {systemBanner.type === "success" && (
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-[#00F0B5]" />
+              )}
+              {systemBanner.type === "info" && (
+                <Zap className="w-4 h-4 shrink-0 text-[#6C63FF]" />
+              )}
+              <span>{systemBanner.message}</span>
             </div>
             <button
               type="button"
+              aria-label="Dismiss notification"
               onClick={() => useSystemStore.setState({ systemBanner: null })}
               className="p-1 text-slate-400 hover:text-white transition"
             >

@@ -829,15 +829,14 @@ impl WorkerSupervisor {
     }
 
     pub fn shutdown(&self) {
-        let slot_count = { self.lock_inner().slots.len() };
-        for slot_idx in 0..slot_count {
-            let id = uuid::Uuid::new_v4().to_string();
-            let cmd = HostCommand::new(id, HostCommandPayload::Shutdown);
-            let _ = self.send_command_to_slot(slot_idx, &cmd);
-        }
         let mut guard = self.lock_inner();
+        // Drop stdin immediately so all children receive EOF concurrently
         for slot in &mut guard.slots {
             slot.stdin.take();
+        }
+
+        // Kill and reap children immediately to guarantee sub-500ms shutdown across all slots
+        for slot in &mut guard.slots {
             if let Some(mut child) = slot.child.take() {
                 let _ = child.kill();
                 let _ = child.wait();

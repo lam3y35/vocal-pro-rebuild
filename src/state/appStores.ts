@@ -18,6 +18,45 @@ import {
 } from "../bindings";
 import { SupportedLocale } from "../i18n/translations";
 import { invokeCommand, invokeCommandStrict, isTauriRuntime, toAssetUrl } from "../ipc";
+import { audioEngine } from "../utils/audioPlayer";
+
+export type BannerType = "info" | "success" | "warning" | "error";
+
+export interface BannerInfo {
+  message: string;
+  type: BannerType;
+}
+
+export function inferBannerType(msg: string): BannerType {
+  const lower = msg.toLowerCase();
+  if (
+    lower.includes("error") ||
+    lower.includes("failed") ||
+    lower.includes("fatal") ||
+    lower.includes("exception") ||
+    lower.includes("corrupt")
+  ) {
+    return "error";
+  }
+  if (lower.includes("warning") || lower.includes("warn") || lower.includes("⚠️")) {
+    return "warning";
+  }
+  if (
+    lower.includes("success") ||
+    lower.includes("complete") ||
+    lower.includes("saved") ||
+    lower.includes("imported") ||
+    lower.includes("created")
+  ) {
+    return "success";
+  }
+  return "info";
+}
+
+const makeBanner = (msg: string, type?: BannerType): BannerInfo => ({
+  message: msg,
+  type: type || inferBannerType(msg),
+});
 
 // ---------------------------------------------------------------------------
 // 1. Jobs Store (Queue, Priority, Reorder, Pause/Resume, Multi-Job Tabs, Cancel)
@@ -44,7 +83,7 @@ interface JobsState {
   toggleQueuePaused: () => void;
   setJobPriority: (jobId: string, priority: JobPriority) => void;
   reorderJob: (jobId: string, direction: "up" | "down") => void;
-  retryFailedJob: (jobId: string) => void;
+  retryFailedJob: (jobId: string) => Promise<void> | void;
   clearCompletedJobs: () => void;
   simulateFailedJob: () => void;
   startSeparationBatch: () => void;
@@ -92,21 +131,50 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     const settingsPatch: Record<string, any> = {};
     if (patch.model !== undefined) settingsPatch.model_name = patch.model;
     if (patch.device !== undefined) settingsPatch.device = patch.device;
+    if (patch.output_mode !== undefined) settingsPatch.output_mode = patch.output_mode;
     if (patch.output_format !== undefined) settingsPatch.output_format = patch.output_format;
     if (patch.wav_bit_depth !== undefined) settingsPatch.wav_bit_depth = patch.wav_bit_depth;
-    if (patch.audio_bitrate !== undefined) settingsPatch.mp3_bitrate = patch.audio_bitrate;
+    if (patch.audio_bitrate !== undefined) {
+      settingsPatch.audio_bitrate = patch.audio_bitrate;
+      settingsPatch.mp3_bitrate = patch.audio_bitrate;
+    }
+    if (patch.output_all_stems !== undefined) settingsPatch.output_all_stems = patch.output_all_stems;
+    if (patch.output_video !== undefined) settingsPatch.output_video = patch.output_video;
+    if (patch.video_output_mode !== undefined) settingsPatch.video_output_mode = patch.video_output_mode;
+    if (patch.delete_input_file !== undefined) settingsPatch.delete_input_file = patch.delete_input_file;
     if (patch.shifts !== undefined) settingsPatch.shifts = patch.shifts;
     if (patch.overlap !== undefined) settingsPatch.overlap = patch.overlap;
     if (patch.segment !== undefined) settingsPatch.segment = patch.segment;
     if (patch.fp16_inference !== undefined) settingsPatch.fp16_inference = patch.fp16_inference;
+    if (patch.ensemble_mode !== undefined) settingsPatch.ensemble_mode = patch.ensemble_mode;
+    if (patch.song_mode !== undefined) settingsPatch.song_mode = patch.song_mode;
+    if (patch.trim_silence !== undefined) settingsPatch.trim_silence = patch.trim_silence;
+    if (patch.enable_vocal_gate !== undefined) settingsPatch.enable_vocal_gate = patch.enable_vocal_gate;
+    if (patch.gate_threshold_db !== undefined) settingsPatch.gate_threshold_db = patch.gate_threshold_db;
+    if (patch.gate_floor_db !== undefined) settingsPatch.gate_floor_db = patch.gate_floor_db;
+    if (patch.denoise_strength !== undefined) settingsPatch.denoise_strength = patch.denoise_strength;
+    if (patch.min_vocal_duration !== undefined) settingsPatch.min_vocal_duration = patch.min_vocal_duration;
+    if (patch.enable_multiband_denoise !== undefined) {
+      settingsPatch.enable_multiband_denoise = patch.enable_multiband_denoise;
+    }
+    if (patch.enable_sfx_separation !== undefined) {
+      settingsPatch.enable_sfx_separation = patch.enable_sfx_separation;
+    }
+    if (patch.save_background_track !== undefined) {
+      settingsPatch.save_background_track = patch.save_background_track;
+    }
+    if (patch.karaoke_mode !== undefined) settingsPatch.karaoke_mode = patch.karaoke_mode;
+    if (patch.enable_hf_restore !== undefined) settingsPatch.enable_hf_restore = patch.enable_hf_restore;
+    if (patch.hf_boost_db !== undefined) settingsPatch.hf_boost_db = patch.hf_boost_db;
     if (patch.enable_loudness_normalize !== undefined) {
       settingsPatch.enable_loudness_normalize = patch.enable_loudness_normalize;
     }
     if (patch.enable_spectral_denoise !== undefined) {
       settingsPatch.enable_spectral_denoise = patch.enable_spectral_denoise;
     }
-    if (patch.song_mode !== undefined) settingsPatch.song_mode = patch.song_mode;
-    void invokeCommand("update_settings", { patch: settingsPatch });
+    if (Object.keys(settingsPatch).length > 0) {
+      void invokeCommand("update_settings", { patch: settingsPatch });
+    }
   },
   toggleSongMode: (enabled) => {
     set((s) => ({
@@ -130,7 +198,9 @@ export const useJobsStore = create<JobsState>((set, get) => ({
   },
   setCustomOutputDir: (dir) => {
     set({ customOutputDir: dir });
-    void invokeCommand("update_settings", { patch: { custom_output_dir: dir } });
+    void invokeCommand("update_settings", {
+      patch: { custom_output_dir: dir, default_output_dir: dir },
+    });
   },
   setParallelWorkers: (n) => {
     const clamped = Math.max(1, Math.min(4, n));
@@ -183,25 +253,117 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       return { jobs: nextJobs };
     });
   },
-  retryFailedJob: (jobId) => {
+  retryFailedJob: async (jobId) => {
     const failed = get().jobs.find((j) => j.job_id === jobId);
     if (!failed) return;
+
+    const targetFile = failed.input_path;
+    const targetOptions = failed.options || get().options;
+    const targetOutDir = get().customOutputDir || failed.output_dir || "";
+
     set((s) => ({
       jobs: s.jobs.map((j) =>
         j.job_id === jobId
           ? {
               ...j,
-              status: "inferring",
-              phase: "inference",
-              percent: 35,
+              status: "loading_model",
+              phase: "loading_model",
+              percent: 5,
               error_code: null,
               error_message: null,
-              message: "Retrying separation on fresh worker process...",
+              message: `Retrying separation for ${targetFile.split(/[\\/]/).pop()}...`,
             }
           : j
       ),
+      activeJobId: jobId,
     }));
-    get().appendLog(`[retry] Retrying ${jobId} on respawned worker slot...`);
+    get().appendLog(`[retry] Re-dispatching backend separation for ${targetFile}...`);
+
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    try {
+      const promise = invokeCommandStrict<JobRecord[]>("start_separation_batch", {
+        inputs: [targetFile],
+        outputDir: targetOutDir,
+        options: targetOptions,
+      });
+
+      pollTimer = setInterval(async () => {
+        try {
+          const liveJobs = await invokeCommand<JobRecord[]>("list_jobs");
+          if (liveJobs && Array.isArray(liveJobs) && liveJobs.length > 0) {
+            set((s) => {
+              const live = liveJobs.find((lj) => lj.input_path === targetFile);
+              if (!live) return s;
+              return {
+                jobs: s.jobs.map((j) =>
+                  j.job_id === jobId ? { ...j, ...live, job_id: jobId } : j
+                ),
+              };
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }, 400);
+
+      const records = await promise;
+      if (pollTimer) clearInterval(pollTimer);
+
+      const rec = records && Array.isArray(records) ? records[0] : null;
+      if (!rec || (rec as any).status === "failed" || !rec.stems || rec.stems.length === 0) {
+        const errMsg = (rec as any)?.error_message || "Separation worker failed to generate stems on retry.";
+        set((s) => ({
+          jobs: s.jobs.map((j) =>
+            j.job_id === jobId ? { ...j, status: "failed", error_message: errMsg } : j
+          ),
+        }));
+        useSystemStore.getState().showBanner(`Retry failed: ${errMsg}`, "error");
+        get().appendLog(`[retry_error] Retry failed for ${targetFile}: ${errMsg}`);
+        return;
+      }
+
+      set((s) => ({
+        jobs: s.jobs.map((j) =>
+          j.job_id === jobId ? { ...j, ...rec, job_id: jobId, status: "done", percent: 100 } : j
+        ),
+      }));
+
+      const fname = targetFile.split(/[\\/]/).pop() || "track";
+      useSystemStore.getState().showBanner(`Successfully separated "${fname}" into ${rec.stems.length} stems!`, "success");
+      get().appendLog(`[retry_done] Successfully separated ${targetFile} -> ${rec.stems.length} stems`);
+
+      const [outs, hists] = await Promise.all([
+        invokeCommand<OutputFolderEntry[]>("list_outputs"),
+        invokeCommand<SeparationHistoryEntry[]>("list_separation_history"),
+      ]);
+      if (outs && Array.isArray(outs) && outs.length > 0) {
+        useLibraryStore.setState({ outputs: outs });
+      }
+      if (hists && Array.isArray(hists) && hists.length > 0) {
+        useLibraryStore.setState({ separationHistory: hists });
+      }
+
+      if (get().autoOpenFolder && rec.output_dir) {
+        void invokeCommand("open_folder", { path: rec.output_dir });
+      }
+    } catch (err: any) {
+      if (pollTimer) clearInterval(pollTimer);
+      const errStr = String(err?.message || err);
+      const isMissingModel =
+        errStr.toLowerCase().includes("model") ||
+        errStr.toLowerCase().includes("weight") ||
+        errStr.toLowerCase().includes("not found");
+      const userMessage = isMissingModel
+        ? "AI model not found locally. Run setup.bat once or check {localappdata}\\VocalPro\\models."
+        : `Retry error: ${errStr}`;
+      set((s) => ({
+        jobs: s.jobs.map((j) =>
+          j.job_id === jobId ? { ...j, status: "failed", error_message: userMessage } : j
+        ),
+      }));
+      useSystemStore.getState().showBanner(userMessage, "error");
+      get().appendLog(`[retry_error] ${userMessage}`);
+    }
   },
   clearCompletedJobs: () => {
     set((s) => ({
@@ -251,7 +413,8 @@ export const useJobsStore = create<JobsState>((set, get) => ({
 
     if (!isTauriRuntime()) {
       useSystemStore.getState().showBanner(
-        "⚠️ Browser Mode: Tauri Desktop runtime required to run native PyTorch Demucs models. Run 'npm run tauri dev' or launch vocalpro.exe."
+        "⚠️ Browser Mode: Tauri Desktop runtime required to run native PyTorch Demucs models. Run 'npm run tauri dev' or launch vocalpro.exe.",
+        "warning"
       );
       appendLog("[notice] Web browser mode detected. Real GPU/CPU AI separation requires native Tauri runtime.");
     }
@@ -375,7 +538,10 @@ export const useJobsStore = create<JobsState>((set, get) => ({
         for (const rec of records) {
           if (!rec.stems || rec.stems.length === 0 || (rec as any).status === "failed") {
             const fname = rec.input_path.split(/[\\/]/).pop() || "track";
-            useSystemStore.getState().showBanner(`Warning: ${fname} failed: ${(rec as any).error_message || "no stems generated"}`);
+            useSystemStore.getState().showBanner(
+              `Warning: ${fname} failed: ${(rec as any).error_message || "no stems generated"}`,
+              "warning"
+            );
           } else {
             appendLog(
               `[job_done] Completed ${rec.input_path} -> ${rec.stems.length} stems written to ${rec.output_dir}`
@@ -395,7 +561,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       const userMessage = isMissingModel
         ? "AI model not found locally. Run setup.bat once or check {localappdata}\\VocalPro\\models."
         : `Separation error: ${errStr}`;
-      useSystemStore.getState().showBanner(userMessage);
+      useSystemStore.getState().showBanner(userMessage, "error");
       set((s) => ({
         jobs: s.jobs.map((j) =>
           newJobs.some((nj) => nj.job_id === j.job_id)
@@ -456,37 +622,10 @@ interface MixerState {
   exportStemMidi: (stemName: string) => void;
 }
 
-const stemAudioMap = new Map<string, HTMLAudioElement>();
-let playheadTimer: ReturnType<typeof setInterval> | null = null;
-
-function syncStemVolumes(stems: StemTrackInfo[]) {
-  const hasSolo = stems.some((s) => s.solo);
-  for (const s of stems) {
-    const el = stemAudioMap.get(s.name);
-    if (!el) continue;
-    if (s.mute) {
-      el.volume = 0;
-    } else if (hasSolo) {
-      el.volume = s.solo ? Math.min(1, Math.max(0, s.gain)) : 0;
-    } else {
-      el.volume = Math.min(1, Math.max(0, s.gain));
-    }
-  }
-}
-
-function stopAllAudio() {
-  for (const el of stemAudioMap.values()) {
-    try {
-      el.pause();
-    } catch {
-      // ignore
-    }
-  }
-  if (playheadTimer) {
-    clearInterval(playheadTimer);
-    playheadTimer = null;
-  }
-}
+audioEngine.setCallbacks(
+  (playheadSec) => useMixerStore.setState({ playheadSec }),
+  (playing) => useMixerStore.setState({ playing })
+);
 
 export const useMixerStore = create<MixerState>((set, get) => ({
   activeFolder: "",
@@ -498,8 +637,7 @@ export const useMixerStore = create<MixerState>((set, get) => ({
   lastExportMessage: null,
   stems: [],
   loadFolderStems: (entry) => {
-    stopAllAudio();
-    stemAudioMap.clear();
+    audioEngine.stop();
 
     const AUDIO_STEM_EXTS = [".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".aif", ".aiff"];
     const isAudioStem = (s: { name: string; path: string }) => {
@@ -525,18 +663,7 @@ export const useMixerStore = create<MixerState>((set, get) => ({
       duration_s: s.duration_s,
     }));
 
-    for (const s of newStems) {
-      try {
-        const src = toAssetUrl(s.path);
-        const audio = new Audio(src);
-        audio.preload = "auto";
-        stemAudioMap.set(s.name, audio);
-      } catch (e) {
-        console.warn("Failed to create Audio element for", s.name, e);
-      }
-    }
-
-    syncStemVolumes(newStems);
+    audioEngine.loadStems(newStems, toAssetUrl);
 
     set({
       activeFolder: entry.folder_path,
@@ -550,24 +677,23 @@ export const useMixerStore = create<MixerState>((set, get) => ({
   },
   setStemGain: (name, gain) => {
     const clamped = Math.max(0, Math.min(2, gain));
+    audioEngine.setStemGain(name, clamped);
     void invokeCommand("mixer_set_gain", { stemName: name, gain: clamped });
-    set((s) => {
-      const nextStems = s.stems.map((st) => (st.name === name ? { ...st, gain: clamped } : st));
-      syncStemVolumes(nextStems);
-      return { stems: nextStems };
-    });
+    set((s) => ({
+      stems: s.stems.map((st) => (st.name === name ? { ...st, gain: clamped } : st)),
+    }));
   },
   toggleMute: (name) =>
     set((s) => {
       const nextStems = s.stems.map((st) => {
         if (st.name === name) {
           const nextMute = !st.mute;
+          audioEngine.setStemMute(name, nextMute);
           void invokeCommand("mixer_set_mute", { stemName: name, mute: nextMute });
           return { ...st, mute: nextMute };
         }
         return st;
       });
-      syncStemVolumes(nextStems);
       return { stems: nextStems };
     }),
   toggleSolo: (name) =>
@@ -575,112 +701,36 @@ export const useMixerStore = create<MixerState>((set, get) => ({
       const nextStems = s.stems.map((st) => {
         if (st.name === name) {
           const nextSolo = !st.solo;
+          audioEngine.setStemSolo(name, nextSolo);
           void invokeCommand("mixer_set_solo", { stemName: name, solo: nextSolo });
           return { ...st, solo: nextSolo };
         }
         return st;
       });
-      syncStemVolumes(nextStems);
       return { stems: nextStems };
     }),
   resetStems: () =>
     set((s) => {
-      const nextStems = s.stems.map((st) => ({ ...st, gain: 1.0, mute: false, solo: false }));
-      syncStemVolumes(nextStems);
-      for (const st of nextStems) {
+      const nextStems = s.stems.map((st) => {
+        audioEngine.setStemGain(st.name, 1.0);
+        audioEngine.setStemMute(st.name, false);
+        audioEngine.setStemSolo(st.name, false);
         void invokeCommand("mixer_set_gain", { stemName: st.name, gain: 1.0 });
         void invokeCommand("mixer_set_mute", { stemName: st.name, mute: false });
         void invokeCommand("mixer_set_solo", { stemName: st.name, solo: false });
-      }
+        return { ...st, gain: 1.0, mute: false, solo: false };
+      });
       return { stems: nextStems };
     }),
   togglePlay: () => {
     const state = get();
     if (state.stems.length === 0) return;
-
-    if (state.playing) {
-      stopAllAudio();
-      set({ playing: false });
-    } else {
-      let startSec = state.playheadSec;
-      if (startSec >= state.durationSec - 0.2) {
-        startSec = 0;
-      }
-
-      if (stemAudioMap.size === 0) {
-        for (const s of state.stems) {
-          try {
-            const src = toAssetUrl(s.path);
-            const audio = new Audio(src);
-            audio.preload = "auto";
-            stemAudioMap.set(s.name, audio);
-          } catch {
-            // ignore
-          }
-        }
-      }
-
-      syncStemVolumes(state.stems);
-
-      for (const el of stemAudioMap.values()) {
-        try {
-          el.currentTime = startSec;
-          void el.play().catch((err) => console.warn("Audio playback error:", err));
-        } catch (e) {
-          console.warn("Audio play error:", e);
-        }
-      }
-
-      if (playheadTimer) clearInterval(playheadTimer);
-      playheadTimer = setInterval(() => {
-        const audioElements = Array.from(stemAudioMap.values());
-        const masterAudio = audioElements[0];
-        if (masterAudio && !isNaN(masterAudio.currentTime)) {
-          const masterTime = masterAudio.currentTime;
-          const dur = get().durationSec;
-
-          // Multi-track active drift compensation: keep all stems locked to master clock (< 15ms)
-          for (let idx = 1; idx < audioElements.length; idx++) {
-            const slaveAudio = audioElements[idx];
-            if (!isNaN(slaveAudio.currentTime) && !slaveAudio.paused) {
-              const drift = Math.abs(slaveAudio.currentTime - masterTime);
-              if (drift > 0.015) {
-                slaveAudio.currentTime = masterTime;
-              }
-            }
-          }
-
-          if (masterTime >= dur && dur > 0) {
-            stopAllAudio();
-            set({ playing: false, playheadSec: 0 });
-          } else {
-            set({ playheadSec: masterTime });
-          }
-        } else {
-          const next = get().playheadSec + 0.08;
-          if (next >= get().durationSec && get().durationSec > 0) {
-            stopAllAudio();
-            set({ playing: false, playheadSec: 0 });
-          } else {
-            set({ playheadSec: next });
-          }
-        }
-      }, 80);
-
-      set({ playing: true, playheadSec: startSec });
-    }
+    audioEngine.togglePlay();
   },
   seek: (sec) => {
     const clamped = Math.max(0, Math.min(get().durationSec, sec));
-    for (const el of stemAudioMap.values()) {
-      try {
-        el.currentTime = clamped;
-      } catch {
-        // ignore
-      }
-    }
+    audioEngine.seek(clamped);
     void invokeCommand("mixer_seek", { frame: Math.round(clamped * 44100) });
-    set({ playheadSec: clamped });
   },
   setExportFormat: (fmt) => set({ exportFormat: fmt }),
   setExportBitrate: (br) => set({ exportBitrate: br }),
@@ -967,7 +1017,7 @@ interface SystemState {
   models: ModelInfo[];
   changelog: ChangelogRelease[];
   showChangelogModal: boolean;
-  systemBanner: string | null;
+  systemBanner: BannerInfo | null;
   setLocale: (loc: SupportedLocale) => void;
   setTheme: (theme: "dark" | "light" | "system") => void;
   setUiScale: (scale: 90 | 100 | 110 | 125) => void;
@@ -995,7 +1045,7 @@ interface SystemState {
   exportDiagnosticBundle: () => void;
   setShowChangelogModal: (v: boolean) => void;
   autoOptimizeForHardware: () => void;
-  showBanner: (msg: string) => void;
+  showBanner: (msg: string, type?: BannerType) => void;
   initApp: () => Promise<void>;
 }
 
@@ -1026,7 +1076,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
   desktopShortcutCreated: true,
   showChangelogModal: false,
   systemBanner: null,
-  showBanner: (msg) => set({ systemBanner: msg }),
+  showBanner: (msg, type) => set({ systemBanner: makeBanner(msg, type) }),
   health: {
     running: false,
     worker_version: "",
@@ -1161,27 +1211,27 @@ export const useSystemStore = create<SystemState>((set, get) => ({
     void invokeCommand("update_settings", { patch: { locale: loc } });
   },
   setTheme: (theme) => {
-    set({ theme, systemBanner: `Theme changed to ${theme.toUpperCase()}` });
+    set({ theme, systemBanner: makeBanner(`Theme changed to ${theme.toUpperCase()}`, "info") });
     void invokeCommand("update_settings", { patch: { theme } });
   },
   setUiScale: (uiScale) => {
-    set({ uiScale, systemBanner: `UI Scale set to ${uiScale}%` });
+    set({ uiScale, systemBanner: makeBanner(`UI Scale set to ${uiScale}%`, "info") });
     void invokeCommand("update_settings", { patch: { ui_scale: uiScale } });
   },
   setHighContrast: (highContrast) => {
-    set({ highContrast, systemBanner: `High Contrast Mode: ${highContrast ? "ON" : "OFF"}` });
+    set({ highContrast, systemBanner: makeBanner(`High Contrast Mode: ${highContrast ? "ON" : "OFF"}`, "info") });
     void invokeCommand("update_settings", { patch: { high_contrast: highContrast } });
   },
   setReducedMotion: (reducedMotion) => {
-    set({ reducedMotion, systemBanner: `Reduced Motion: ${reducedMotion ? "ON" : "OFF"}` });
+    set({ reducedMotion, systemBanner: makeBanner(`Reduced Motion: ${reducedMotion ? "ON" : "OFF"}`, "info") });
     void invokeCommand("update_settings", { patch: { reduced_motion: reducedMotion } });
   },
   setAlwaysOnTop: (v) => {
-    set({ alwaysOnTop: v, systemBanner: `Window Always-on-Top: ${v ? "Enabled" : "Disabled"}` });
-    void invokeCommand("set_window_always_on_top", { alwaysOnTop: v });
+    set({ alwaysOnTop: v, systemBanner: makeBanner(`Window Always-on-Top: ${v ? "Enabled" : "Disabled"}`, "info") });
+    void invokeCommand("update_settings", { patch: { always_on_top: v } });
   },
   setMinimizeToTray: (v) => {
-    set({ minimizeToTray: v, systemBanner: `Minimize to System Tray: ${v ? "Enabled" : "Disabled"}` });
+    set({ minimizeToTray: v, systemBanner: makeBanner(`Minimize to System Tray: ${v ? "Enabled" : "Disabled"}`, "info") });
     void invokeCommand("update_settings", { patch: { minimize_to_tray: v } });
   },
   setShowOnboardingModal: (v) => set({ showOnboardingModal: v }),
@@ -1193,11 +1243,15 @@ export const useSystemStore = create<SystemState>((set, get) => ({
   setSettingsViewMode: (m) => set({ settingsViewMode: m }),
   setNamingTemplate: (tpl) => {
     set({ namingTemplate: tpl });
-    void invokeCommand("update_settings", { patch: { naming_template: tpl } });
+    void invokeCommand("update_settings", {
+      patch: { naming_template: tpl, file_naming_template: tpl },
+    });
   },
   setConflictPolicy: (p) => {
     set({ conflictPolicy: p });
-    void invokeCommand("update_settings", { patch: { conflict_policy: p } });
+    void invokeCommand("update_settings", {
+      patch: { conflict_policy: p, overwrite_behavior: p },
+    });
   },
   setPreserveFolderStructure: (v) => {
     set({ preserveFolderStructure: v });
@@ -1239,7 +1293,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
         profile_changes_label: label,
         quality_impact_note: qualityNote,
       },
-      systemBanner: `${label} (${qualityNote})`,
+      systemBanner: makeBanner(`${label} (${qualityNote})`, "info"),
     });
     useJobsStore.getState().setParallelWorkers(workers);
     useJobsStore.getState().setOptions({
@@ -1250,7 +1304,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
     });
   },
   calibrateHardware: () => {
-    set({ calibrating: true, systemBanner: "Running <= 30s hardware micro-calibration benchmark..." });
+    set({ calibrating: true, systemBanner: makeBanner("Running <= 30s hardware micro-calibration benchmark...", "info") });
     void invokeCommand("calibrate_hardware");
     setTimeout(() => {
       const res = {
@@ -1261,7 +1315,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       set({
         calibrating: false,
         lastCalibrationResult: res,
-        systemBanner: `Hardware Calibration Complete in ${res.elapsed_ms} ms (${res.throughput_x_realtime}x real-time, fingerprint=${res.hardware_fingerprint})`,
+        systemBanner: makeBanner(`Hardware Calibration Complete in ${res.elapsed_ms} ms (${res.throughput_x_realtime}x real-time, fingerprint=${res.hardware_fingerprint})`, "success"),
       });
     }, 120);
   },
@@ -1271,7 +1325,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       const defVal = (DEFAULT_JOB_OPTIONS as unknown as Record<string, unknown>)[key];
       useJobsStore.getState().setOptions({ [key]: defVal } as Partial<JobOptions>);
     }
-    set({ systemBanner: `Reset setting '${key}' to recommended default.` });
+    set({ systemBanner: makeBanner(`Reset setting '${key}' to recommended default.`, "info") });
   },
   resetAllSettings: () => {
     void invokeCommand("reset_settings_to_defaults");
@@ -1285,7 +1339,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       namingTemplate: "{track}_{stem}",
       conflictPolicy: "append_number",
       preserveFolderStructure: true,
-      systemBanner: "All settings reset to recommended defaults.",
+      systemBanner: makeBanner("All settings reset to recommended defaults.", "success"),
     });
   },
   exportSettingsJson: () => {
@@ -1303,7 +1357,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       null,
       2
     );
-    set({ systemBanner: "Exported settings JSON to clipboard / file." });
+    set({ systemBanner: makeBanner("Exported settings JSON to clipboard / file.", "success") });
     return payload;
   },
   importSettingsJson: (rawJson) => {
@@ -1313,24 +1367,26 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       if (parsed.options) {
         useJobsStore.getState().setOptions(parsed.options);
       }
-      set({ systemBanner: "Imported settings JSON successfully." });
+      set({ systemBanner: makeBanner("Imported settings JSON successfully.", "success") });
     } catch {
-      set({ systemBanner: "Failed to parse imported settings JSON." });
+      set({ systemBanner: makeBanner("Failed to parse imported settings JSON.", "error") });
     }
   },
   registerFileAssociations: () => {
     void invokeCommand("register_file_associations");
     set({
       fileAssociationsRegistered: true,
-      systemBanner:
+      systemBanner: makeBanner(
         "Registered Windows File Associations (.mp3, .wav, .flac, .ogg, .mp4, .mkv, .avi, .mov) in HKCU\\Software\\Classes",
+        "success"
+      ),
     });
   },
   createDesktopShortcut: () => {
     void invokeCommand("create_desktop_shortcut");
     set({
       desktopShortcutCreated: true,
-      systemBanner: "Created Desktop Shortcut (VocalPro.lnk)",
+      systemBanner: makeBanner("Created Desktop Shortcut (VocalPro.lnk)", "success"),
     });
   },
   restartWorker: async () => {
@@ -1340,22 +1396,24 @@ export const useSystemStore = create<SystemState>((set, get) => ({
         set({
           health,
           systemBanner: health.running
-            ? `AI Engine Ready • PyTorch ${health.torch_version} (${health.cuda_available ? "CUDA" : "CPU"})`
-            : `AI Worker offline: ${health.last_error || "Check setup.bat"}`,
+            ? makeBanner(`AI Engine Ready • PyTorch ${health.torch_version} (${health.cuda_available ? "CUDA" : "CPU"})`, "success")
+            : makeBanner(`AI Worker offline: ${health.last_error || "Check setup.bat"}`, "warning"),
         });
       }
     } catch (err: any) {
       set((s) => ({
         health: { ...s.health, running: false, last_error: String(err?.message || err) },
-        systemBanner: `AI Worker restart error: ${err?.message || err}`,
+        systemBanner: makeBanner(`AI Worker restart error: ${err?.message || err}`, "error"),
       }));
     }
   },
   exportDiagnosticBundle: () => {
     void invokeCommand("export_diagnostic_bundle");
     set({
-      systemBanner:
+      systemBanner: makeBanner(
         "Exported diagnostic bundle -> vocalpro_diagnostics.zip (worker_logs.txt, settings.json, worker_health.json)",
+        "success"
+      ),
     });
   },
   setShowChangelogModal: (v) => set({ showChangelogModal: v }),
@@ -1366,7 +1424,10 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       if (profile) {
         set({
           hardwareProfile: profile,
-          systemBanner: `Auto-tuned for hardware: ${profile.recommended_device.toUpperCase()} • ${profile.recommended_max_concurrent_jobs} parallel workers • segment=${profile.recommended_segment_s}s (Optimal ${mode} profile active)`,
+          systemBanner: makeBanner(
+            `Auto-tuned for hardware: ${profile.recommended_device.toUpperCase()} • ${profile.recommended_max_concurrent_jobs} parallel workers • segment=${profile.recommended_segment_s}s (Optimal ${mode} profile active)`,
+            "info"
+          ),
         });
         useJobsStore.getState().setParallelWorkers(profile.recommended_max_concurrent_jobs);
         useJobsStore.getState().setOptions({
@@ -1402,11 +1463,34 @@ export const useSystemStore = create<SystemState>((set, get) => ({
         if (settings.reduced_motion !== undefined) set({ reducedMotion: Boolean(settings.reduced_motion) });
         if (settings.always_on_top !== undefined) set({ alwaysOnTop: Boolean(settings.always_on_top) });
         if (settings.minimize_to_tray !== undefined) set({ minimizeToTray: Boolean(settings.minimize_to_tray) });
-        if (settings.naming_template) set({ namingTemplate: settings.naming_template });
-        if (settings.conflict_policy) set({ conflictPolicy: settings.conflict_policy });
+        if (settings.onboarding_completed !== undefined || settings.onboarding_done !== undefined) {
+          set({ onboardingDone: Boolean(settings.onboarding_completed ?? settings.onboarding_done) });
+        }
+
+        const namingTpl = settings.naming_template || settings.file_naming_template;
+        if (namingTpl) set({ namingTemplate: namingTpl });
+
+        const conflict = settings.conflict_policy || settings.overwrite_behavior;
+        if (conflict) set({ conflictPolicy: conflict });
+
         if (settings.preserve_folder_structure !== undefined) {
           set({ preserveFolderStructure: Boolean(settings.preserve_folder_structure) });
         }
+        if (settings.max_cache_size_gb !== undefined) {
+          set({ maxCacheSizeGb: Number(settings.max_cache_size_gb) });
+        }
+
+        const outDir = settings.custom_output_dir || settings.default_output_dir;
+        if (outDir) {
+          useJobsStore.setState({ customOutputDir: outDir });
+        }
+        if (settings.auto_open_folder !== undefined) {
+          useJobsStore.setState({ autoOpenFolder: Boolean(settings.auto_open_folder) });
+        }
+        if (settings.max_concurrent_jobs) {
+          useJobsStore.setState({ parallelWorkers: Number(settings.max_concurrent_jobs) });
+        }
+
         if (settings.hardware_profile_mode) {
           const raw = String(settings.hardware_profile_mode).toLowerCase();
           const modeMap: Record<string, PerformanceProfileMode> = {
@@ -1418,31 +1502,50 @@ export const useSystemStore = create<SystemState>((set, get) => ({
           if (modeMap[raw]) set({ activeProfileMode: modeMap[raw] });
         }
 
-        if (settings.custom_output_dir) {
-          useJobsStore.setState({ customOutputDir: settings.custom_output_dir });
-        }
-        if (settings.max_concurrent_jobs) {
-          useJobsStore.setState({ parallelWorkers: Number(settings.max_concurrent_jobs) });
-        }
-
-        // Restore model, device, DSP parameters, and export settings
+        // Restore complete separation & DSP options
         const jobPatch: Partial<JobOptions> = {};
         if (settings.model_name) jobPatch.model = settings.model_name;
         if (settings.device) jobPatch.device = settings.device;
+        if (settings.output_mode) jobPatch.output_mode = settings.output_mode;
         if (settings.output_format) jobPatch.output_format = settings.output_format;
         if (settings.wav_bit_depth) jobPatch.wav_bit_depth = settings.wav_bit_depth;
-        if (settings.mp3_bitrate) jobPatch.audio_bitrate = settings.mp3_bitrate;
+        const bitrate = settings.audio_bitrate || settings.mp3_bitrate;
+        if (bitrate) jobPatch.audio_bitrate = bitrate;
+        if (settings.output_all_stems !== undefined) jobPatch.output_all_stems = Boolean(settings.output_all_stems);
+        if (settings.output_video !== undefined) jobPatch.output_video = Boolean(settings.output_video);
+        if (settings.video_output_mode) jobPatch.video_output_mode = settings.video_output_mode;
+        if (settings.delete_input_file !== undefined) jobPatch.delete_input_file = Boolean(settings.delete_input_file);
         if (settings.shifts !== undefined) jobPatch.shifts = Number(settings.shifts);
         if (settings.overlap !== undefined) jobPatch.overlap = Number(settings.overlap);
         if (settings.segment !== undefined) jobPatch.segment = Number(settings.segment);
         if (settings.fp16_inference !== undefined) jobPatch.fp16_inference = Boolean(settings.fp16_inference);
+        if (settings.ensemble_mode !== undefined) jobPatch.ensemble_mode = Boolean(settings.ensemble_mode);
+        if (settings.song_mode !== undefined) jobPatch.song_mode = Boolean(settings.song_mode);
+        if (settings.trim_silence !== undefined) jobPatch.trim_silence = Boolean(settings.trim_silence);
+        if (settings.enable_vocal_gate !== undefined) jobPatch.enable_vocal_gate = Boolean(settings.enable_vocal_gate);
+        if (settings.gate_threshold_db !== undefined) jobPatch.gate_threshold_db = Number(settings.gate_threshold_db);
+        if (settings.gate_floor_db !== undefined) jobPatch.gate_floor_db = Number(settings.gate_floor_db);
+        if (settings.denoise_strength !== undefined) jobPatch.denoise_strength = Number(settings.denoise_strength);
+        if (settings.min_vocal_duration !== undefined) jobPatch.min_vocal_duration = Number(settings.min_vocal_duration);
+        if (settings.enable_multiband_denoise !== undefined) {
+          jobPatch.enable_multiband_denoise = Boolean(settings.enable_multiband_denoise);
+        }
+        if (settings.enable_sfx_separation !== undefined) {
+          jobPatch.enable_sfx_separation = Boolean(settings.enable_sfx_separation);
+        }
+        if (settings.save_background_track !== undefined) {
+          jobPatch.save_background_track = Boolean(settings.save_background_track);
+        }
+        if (settings.karaoke_mode !== undefined) jobPatch.karaoke_mode = Boolean(settings.karaoke_mode);
+        if (settings.enable_hf_restore !== undefined) jobPatch.enable_hf_restore = Boolean(settings.enable_hf_restore);
+        if (settings.hf_boost_db !== undefined) jobPatch.hf_boost_db = Number(settings.hf_boost_db);
         if (settings.enable_loudness_normalize !== undefined) {
           jobPatch.enable_loudness_normalize = Boolean(settings.enable_loudness_normalize);
         }
         if (settings.enable_spectral_denoise !== undefined) {
           jobPatch.enable_spectral_denoise = Boolean(settings.enable_spectral_denoise);
         }
-        if (settings.song_mode !== undefined) jobPatch.song_mode = Boolean(settings.song_mode);
+
         if (Object.keys(jobPatch).length > 0) {
           useJobsStore.setState((s) => ({ options: { ...s.options, ...jobPatch } }));
         }
@@ -1450,8 +1553,8 @@ export const useSystemStore = create<SystemState>((set, get) => ({
         if (settings.output_format) {
           useMixerStore.setState({ exportFormat: settings.output_format });
         }
-        if (settings.mp3_bitrate) {
-          useMixerStore.setState({ exportBitrate: settings.mp3_bitrate });
+        if (bitrate) {
+          useMixerStore.setState({ exportBitrate: bitrate });
         }
       }
 
