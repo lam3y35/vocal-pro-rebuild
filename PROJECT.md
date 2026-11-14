@@ -81,7 +81,7 @@ Every feature and failure remediation from the Survey phase is mapped to a speci
 | M2 | Tauri v2 Backend, Process Supervision & Robust IPC | Features #6, #7, #8, #9, #10, #11, #12, #13 (`main.rs`, `supervisor.rs`, `commands/`, `tauri_bridge.rs`, cargo tests) | M1 | DONE |
 | M3 | Installer, Packaging, Launchers & Runtime Bootstrapping | Features #14, #15, #16, #17, #18 (`installer.iss`, `.github/workflows/release.yml`, batch scripts, FFmpeg discovery) | M1, M2 | DONE |
 | M4 | Frontend UI/UX, Playback Synchronization & State Persistence | Features #19, #20, #21, #22 (`CanvasWaveform.tsx`, `appStores.ts`, settings, Web Audio clock, build check) | M2 | DONE |
-| M5 | Final Milestone: E2E Test Suite Pass & Adversarial Hardening | Features #23, #24: 51/51 E2E tests, 24/24 Cargo tests, 79/79 Python tests, Adversarial suites | M1, M2, M3, M4 | IN_PROGRESS |
+| M5 | Final Milestone: E2E Test Suite Pass & Adversarial Hardening | Features #23, #24: 58/58 E2E tests, 24/24 Cargo tests, 125/125 Python tests, Adversarial suites | M1, M2, M3, M4 | DONE |
 
 ---
 
