@@ -21,8 +21,10 @@ pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<Mo
     }
 }
 
+type ModelDef<'a> = (&'a str, &'a str, &'a str, Vec<&'a str>, f32, &'a [&'a str]);
+
 pub fn list_supported_models_in_dirs(search_dirs: &[&Path]) -> Vec<ModelInfo> {
-    let defs: [(&str, &str, &str, Vec<&str>, f32, &[&str]); 8] = [
+    let defs: [ModelDef<'_>; 8] = [
         (
             "htdemucs",
             "HTDemucs (Fast & Balanced)",

@@ -368,7 +368,7 @@ impl WorkerSupervisor {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
-            let mut g = self.lock_inner();
+            let g = self.lock_inner();
             if let Some(ref job) = g.job_object {
                 job.assign(child.as_raw_handle() as _);
             }
