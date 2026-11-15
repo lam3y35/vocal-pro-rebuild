@@ -17,7 +17,7 @@ pub mod bridge {
     use crate::worker::supervisor::WorkerHealth;
     use serde_json::Value;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use tauri::State;
 
     #[tauri::command]
@@ -381,7 +381,7 @@ pub mod bridge {
         target_zip: Option<String>,
     ) -> Result<String, String> {
         let dest = match target_zip {
-            Some(raw) => super::sanitize_export_target_path(&raw, &["zip"], "zip")
+            Some(raw) => crate::commands::sanitize_export_target_path(&raw, &["zip"], "zip")
                 .map_err(|e| e.to_string())?,
             None => ctx.app_data_dir.join("vocalpro_diagnostics.zip"),
         };
