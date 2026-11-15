@@ -1,23 +1,27 @@
-# VocalPro v3.0.0 — Windows Release
+# VocalPro v3.0.0 — الحزمة المحمولة للويندوز (Portable Edition)
 
-هذا المجلد يحتوي على النسخة المترجمة الجاهزة للتشغيل للمستخدم النهائي مباشرة (**Production Release**).
-
----
-
-## ⚡ خيارات التحميل المباشر (Direct Downloads):
-
-### 1️⃣ الخيار الموصى به للمستخدم النهائي: مثبت ويندوز المتكامل (Windows Setup Installer)
-* استخدم مثبت `VocalPro-v3.0.0-Windows-Setup.exe` من صفحة [GitHub Releases](https://github.com/lam3y35/vocal-pro-rebuild/releases) لتثبيت التطبيق مع بيئة Python والـ Worker والنماذج المسبقة التحميل بشكل كامل.
-
-### 2️⃣ الحزمة المحمولة الكاملة مضغوطة (Portable ZIP)
-👈 **[اضغط هنا لتحميل VocalPro-v3.0.0-Windows.zip مباشرة](https://github.com/lam3y35/vocal-pro-rebuild/raw/main/release/VocalPro-v3.0.0-Windows.zip)**  
-* عند التشغيل لأول مرة على جهاز لا يحتوي على التثبيت الكامل، فك الضغط ثم شغّل **`Start-VocalPro.bat`** أولاً لتهيئة بيئة Python AI وتمرير أي ملفات صوت/فيديو مسحوبة إلى `vocalpro.exe` (ومع بقاء مجلد `worker/` بجانبهما).
-* تأكد من توفر `ffmpeg` في PATH أو تحديد مساره داخل **Settings -> FFmpeg Path** للتصدير بصيغ MP3/FLAC والفيديو.
+هذا المجلد/الأرشيف مخصص لتشغيل **VocalPro v3.0.0** مباشرة على نظام Windows 10/11.
 
 ---
 
-## 📂 محتويات هذا المجلد:
-* **`VocalPro-v3.0.0-Windows.zip`**: الحزمة المجمعة الكاملة (تحتوي على `vocalpro.exe` و `Start-VocalPro.bat` و `worker/`).
-* **`vocalpro.exe`**: ملف التشغيل المترجم بلغة Rust و Tauri v2 (يعمل مع مجلد `worker/` المجاور).
-* **`Start-VocalPro.bat`**: مشغل مساعد للمستخدم يقوم بالفحص والتشغيل.
-* **`worker/`**: محرك معالجة وعزل المسارات الصوتية بالذكاء الاصطناعي.
+## ⚡ خطوات التشغيل السريعة (Portable ZIP)
+
+1. تأكد من فك ضغط جميع محتويات الأرشيف في مجلد واحد (بحيث يبقى مجلد `worker/` بجانب `vocalpro.exe` و `Start-VocalPro.bat`).
+2. اضغط مرتين على **`Start-VocalPro.bat`** للبدء:
+   - في أول تشغيل، سيتحقق المشغّل تلقائياً من بيئة Python (الإصدارات المدعومة `3.10` إلى `3.12`) ويهيئ محرك PyTorch وDemucs في `%APPDATA%\VocalPro\engine`.
+   - بعد التهيئة، يمكنك فتح **`vocalpro.exe`** مباشرة أو سحب أي ملف صوت/فيديو وإفلاته على `Start-VocalPro.bat` أو داخل نافذة البرنامج.
+3. لتصدير صيغ `MP3` أو `FLAC` أو `OGG` أو معالجة الفيديو، تأكد من توفر `ffmpeg` في النظام (`PATH`) أو حدّد مسار `ffmpeg.exe` من **Settings > FFmpeg Path**.
+
+> **تبحث عن تثبيت تلقائي كامل يعمل بدون أي متطلبات مسبقة؟**  
+> قم بتحميل المُثبّت الشامل **`VocalPro-v3.0.0-AllInOne-Setup.exe`** (الذي يحتوي مسبقاً على Python 3.11 وPyTorch وFFmpeg ونموذج `htdemucs`) من صفحة الإصدارات الرسمية:  
+> 👉 **https://github.com/lam3y35/vocal-pro-rebuild/releases/tag/v3.0.0**
+
+---
+
+## 📂 محتويات الحزمة المحمولة
+* **`vocalpro.exe`**: التطبيق الرئيسي المبني بـ Rust وTauri v2 (يعتمد على وجود مجلد `worker/` المجاور).
+* **`Start-VocalPro.bat`**: مشغّل التهيئة التلقائية للبيئة وفحص المتطلبات.
+* **`worker/vocalpro_worker/`**: محرك الفصل الصوتي والـ DSP بالذكاء الاصطناعي.
+* **`README.md`**: تعليمات التشغيل السريع للمستخدم.
+
+> ملاحظة: لا تقم بنقل أو تشغيل `vocalpro.exe` بمفرده دون وجود مجلد `worker/` بجانبه (أو في المجلد الأب عند التشغيل من الكود المصدري عبر `run.bat`).

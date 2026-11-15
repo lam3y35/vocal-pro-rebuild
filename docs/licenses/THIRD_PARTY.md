@@ -1,6 +1,6 @@
 # VocalPro v3 — Third-Party Licenses & Software Bill of Materials (SBOM)
 
-This document catalogs every open-source library, crate, engine component, and model architecture bundled, linked, or consumed by VocalPro v3.0.0, per **Workstream I: Shipping & Packaging Readiness**.
+This document catalogs every open-source library, crate, engine component, and model architecture bundled, linked, or consumed by VocalPro v3.0.0.
 
 ---
 

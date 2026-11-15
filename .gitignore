@@ -1,6 +1,7 @@
 # Node / Frontend
 node_modules/
 dist/
+tsconfig.tsbuildinfo
 .pnpm-debug.log*
 
 # Rust / Tauri
@@ -26,7 +27,12 @@ benchmarks/reference-real/*_source.*
 # Multi-agent Teamwork runtime directory
 .agents/
 
-# Large binary installers (>100MB, hosted on GitHub Releases)
+# Generated E2E reports
+tests/e2e/E2E_REPORT.md
+
+# Large binary installers & staged release packages (hosted on GitHub Releases CDN)
 release/*-Setup.exe
 release/setup/
+release/*.zip
+release/worker/
 

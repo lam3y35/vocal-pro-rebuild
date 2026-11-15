@@ -111,11 +111,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .join(".venv")
                             .join("bin")
                             .join("python"),
+                        parent.join("../worker/.venv/Scripts/python.exe"),
+                        parent.join("../worker/.venv/bin/python"),
+                        parent.join("../worker/.venv/bin/python3"),
+                        parent.join("../../worker/.venv/Scripts/python.exe"),
+                        parent.join("../../worker/.venv/bin/python"),
+                        parent.join("../../../worker/.venv/Scripts/python.exe"),
                         parent.join("../../../worker/.venv/bin/python"),
                         parent.join("../../../worker/.venv/bin/python3"),
-                        parent.join("../../../worker/.venv/Scripts/python.exe"),
-                        parent.join("../../worker/.venv/bin/python"),
-                        parent.join("../../worker/.venv/Scripts/python.exe"),
                     ];
                     for c in candidates {
                         if c.exists() {
@@ -156,7 +159,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 PathBuf::from("../../worker/.venv/Scripts/python.exe"),
                 PathBuf::from(".venv/bin/python"),
                 PathBuf::from(".venv/Scripts/python.exe"),
-                PathBuf::from("/home/antigravity/.venv/bin/python"),
             ];
             for c in cwd_candidates {
                 if c.exists() {
@@ -184,12 +186,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let candidates = [
                         parent.join("resources").join("worker"),
                         parent.join("worker"),
-                        parent.join("../../../worker"),
-                        parent.join("../../worker"),
                         parent.join("../worker"),
+                        parent.join("../../worker"),
+                        parent.join("../../../worker"),
                     ];
                     for c in candidates {
-                        if c.exists() {
+                        if c.join("vocalpro_worker").exists() {
                             return c.canonicalize().unwrap_or(c);
                         }
                     }
@@ -201,7 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 PathBuf::from("../../worker"),
             ];
             for c in cwd_candidates {
-                if c.exists() {
+                if c.join("vocalpro_worker").exists() {
                     return c.canonicalize().unwrap_or(c);
                 }
             }
