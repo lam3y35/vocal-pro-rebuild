@@ -111,8 +111,8 @@ def test_installer_iss_pascal_prerequisite_checks() -> None:
 
     # 1. WebView2 Evergreen Runtime check function
     assert "function IsWebView2Installed(): Boolean;" in content
-    assert "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}" in content
-    assert "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}" in content
+    assert "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" in content
+    assert "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" in content
     assert "'pv'" in content
     assert "'0.0.0.0'" in content
 

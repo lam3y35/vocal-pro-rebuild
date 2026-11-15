@@ -176,19 +176,19 @@ def test_adversarial_pascal_registry_hive_coverage() -> None:
     # 1. WebView2 registry checks
     # Must check 32-bit WOW64 node (HKLM)
     assert re.search(
-        r"RegQueryStringValue\s*\(\s*HKLM\s*,\s*'SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59\}'\s*,\s*'pv'",
+        r"RegQueryStringValue\s*\(\s*HKLM\s*,\s*'SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5\}'\s*,\s*'pv'",
         code,
     ), "WebView2 check must query WOW6432Node under HKLM"
 
     # Must check native 64-bit node (HKLM64)
     assert re.search(
-        r"RegQueryStringValue\s*\(\s*HKLM64\s*,\s*'SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59\}'\s*,\s*'pv'",
+        r"RegQueryStringValue\s*\(\s*HKLM64\s*,\s*'SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5\}'\s*,\s*'pv'",
         code,
     ), "WebView2 check must query native 64-bit under HKLM64"
 
     # Must check user-level install (HKCU)
     assert re.search(
-        r"RegQueryStringValue\s*\(\s*HKCU\s*,\s*'SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59\}'\s*,\s*'pv'",
+        r"RegQueryStringValue\s*\(\s*HKCU\s*,\s*'SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5\}'\s*,\s*'pv'",
         code,
     ), "WebView2 check must query HKCU user-level install"
 
@@ -240,13 +240,13 @@ class MockPascalRuntime:
         self.user_confirm_response = True  # Simulates IDYES (True) or IDNO (False)
 
     def is_webview2_installed(self) -> bool:
-        guid = "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}"
+        guid = "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
         if guid in self.hklm:
             pv = str(self.hklm[guid].get("pv", ""))
             if pv and pv != "0.0.0.0":
                 return True
 
-        guid_64 = "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}"
+        guid_64 = "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
         if guid_64 in self.hklm64:
             pv = str(self.hklm64[guid_64].get("pv", ""))
             if pv and pv != "0.0.0.0":
@@ -336,8 +336,8 @@ def test_adversarial_prerequisite_truth_table_matrix(
         hklm64[vc_key] = {"Installed": 0}
 
     # Configure WebView2 state
-    wv_wow64 = "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}"
-    wv_native = "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}"
+    wv_wow64 = "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    wv_native = "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
     if webview2_state == "ok_reg64":
         hklm64[wv_native] = {"pv": "120.0.2210.144"}

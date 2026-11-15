@@ -95,7 +95,7 @@ var
 begin
   Result := False;
   // Check 32-bit / WOW6432Node registry key
-  if RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}', 'pv', Version) then
+  if RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version) then
   begin
     if (Version <> '') and (Version <> '0.0.0.0') then
     begin
@@ -105,7 +105,7 @@ begin
   end;
 
   // Check native 64-bit HKLM
-  if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}', 'pv', Version) then
+  if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version) then
   begin
     if (Version <> '') and (Version <> '0.0.0.0') then
     begin
@@ -115,7 +115,7 @@ begin
   end;
 
   // Check HKCU user-level install
-  if RegQueryStringValue(HKCU, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-6F3A4A1F3D59}', 'pv', Version) then
+  if RegQueryStringValue(HKCU, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version) then
   begin
     if (Version <> '') and (Version <> '0.0.0.0') then
     begin
@@ -167,9 +167,9 @@ begin
   // Verify Visual C++ 2015-2022 x64 Redistributable (strictly needed for PyTorch C-extensions)
   if not IsVCRedistInstalled() then
   begin
-    if MsgBox('VocalPro requires Microsoft Visual C++ 2015-2022 x64 Redistributable (vcruntime140_1.dll) to run its AI audio processing engine.' + #13#10#13#10 +
+    if SuppressibleMsgBox('VocalPro requires Microsoft Visual C++ 2015-2022 x64 Redistributable (vcruntime140_1.dll) to run its AI audio processing engine.' + #13#10#13#10 +
               'It was not detected on this system.' + #13#10#13#10 +
-              'Would you like to open the official Microsoft download page now?', mbConfirmation, MB_YESNO) = IDYES then
+              'Would you like to open the official Microsoft download page now?', mbConfirmation, MB_YESNO, IDNO) = IDYES then
     begin
       ShellExec('open', 'https://aka.ms/vs/17/release/vc_redist.x64.exe', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
     end;
@@ -180,9 +180,9 @@ begin
   // Verify Microsoft Edge WebView2 Evergreen Runtime (strictly needed for Tauri v2 desktop UI)
   if not IsWebView2Installed() then
   begin
-    if MsgBox('VocalPro requires Microsoft Edge WebView2 Runtime to display its desktop user interface.' + #13#10#13#10 +
+    if SuppressibleMsgBox('VocalPro requires Microsoft Edge WebView2 Runtime to display its desktop user interface.' + #13#10#13#10 +
               'It was not detected on this system.' + #13#10#13#10 +
-              'Would you like to open the official Microsoft download page now?', mbConfirmation, MB_YESNO) = IDYES then
+              'Would you like to open the official Microsoft download page now?', mbConfirmation, MB_YESNO, IDNO) = IDYES then
     begin
       ShellExec('open', 'https://go.microsoft.com/fwlink/p/?LinkId=2124703', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
     end;
