@@ -145,7 +145,9 @@ async fn test_adversarial_batch_separation_fault_isolation_mixed_payloads() {
     let records = ctx
         .submit_batch_separations(inputs.clone(), out_dir.to_string_lossy().to_string(), opts)
         .await
-        .expect("Batch separation must NEVER short-circuit or return Err on individual file errors");
+        .expect(
+            "Batch separation must NEVER short-circuit or return Err on individual file errors",
+        );
 
     let elapsed = start_t.elapsed();
     println!(

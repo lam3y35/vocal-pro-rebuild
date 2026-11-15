@@ -167,7 +167,10 @@ pub mod bridge {
     }
 
     #[tauri::command]
-    pub fn mixer_seek(ctx: State<'_, AppContext>, position_sec: f64) -> Result<MixerSnapshot, String> {
+    pub fn mixer_seek(
+        ctx: State<'_, AppContext>,
+        position_sec: f64,
+    ) -> Result<MixerSnapshot, String> {
         ctx.mixer_seek(position_sec).map_err(|e| e.to_string())
     }
 
@@ -189,7 +192,9 @@ pub mod bridge {
         pans: Option<HashMap<String, f32>>,
     ) -> Result<String, String> {
         if has_unsafe_path(&output_path) {
-            return Err("Unsafe path ('..' or network share) is not allowed in export path".to_string());
+            return Err(
+                "Unsafe path ('..' or network share) is not allowed in export path".to_string(),
+            );
         }
         let ctx_clone = ctx.inner().clone();
         tokio::task::spawn_blocking(move || {
@@ -202,11 +207,8 @@ pub mod bridge {
                     let snap = m.snapshot();
                     let vols =
                         crate::audio::mixer::LiveStemMixer::compute_effective_volumes(&snap.stems);
-                    let pan_map: HashMap<String, f32> = snap
-                        .stems
-                        .iter()
-                        .map(|s| (s.name.clone(), s.pan))
-                        .collect();
+                    let pan_map: HashMap<String, f32> =
+                        snap.stems.iter().map(|s| (s.name.clone(), s.pan)).collect();
                     (Some(snap.folder_path), vols, pan_map)
                 } else {
                     (None, HashMap::new(), HashMap::new())
@@ -276,11 +278,8 @@ pub mod bridge {
                     let snap = m.snapshot();
                     let vols =
                         crate::audio::mixer::LiveStemMixer::compute_effective_volumes(&snap.stems);
-                    let pan_map: HashMap<String, f32> = snap
-                        .stems
-                        .iter()
-                        .map(|s| (s.name.clone(), s.pan))
-                        .collect();
+                    let pan_map: HashMap<String, f32> =
+                        snap.stems.iter().map(|s| (s.name.clone(), s.pan)).collect();
                     (vols, pan_map)
                 } else {
                     (HashMap::new(), HashMap::new())
@@ -568,8 +567,8 @@ pub mod bridge {
             .map(|e| e.to_ascii_lowercase())
             .unwrap_or_default();
         const ALLOWED: &[&str] = &[
-            "mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif",
-            "mp4", "mkv", "webm", "avi", "mov", "m4v", "mid", "midi",
+            "mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif", "mp4",
+            "mkv", "webm", "avi", "mov", "m4v", "mid", "midi",
         ];
         if !ALLOWED.contains(&ext.as_str()) {
             return Err(format!("Refusing to launch non-media file type: .{}", ext));

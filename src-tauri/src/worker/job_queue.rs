@@ -152,8 +152,7 @@ impl JobQueue {
                 rec.eta_s = None;
                 rec.error_code = Some("INTERRUPTED".to_string());
                 rec.error_message = Some(
-                    "Session interrupted before job completion. Click Retry to resume."
-                        .to_string(),
+                    "Session interrupted before job completion. Click Retry to resume.".to_string(),
                 );
                 rec.message = "Interrupted on previous shutdown — ready to retry".to_string();
             }

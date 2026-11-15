@@ -83,7 +83,10 @@ impl JobObject {
 
     fn assign(&self, process_handle: windows_sys::Win32::Foundation::HANDLE) -> bool {
         unsafe {
-            windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(self.handle, process_handle) != 0
+            windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
+                self.handle,
+                process_handle,
+            ) != 0
         }
     }
 }
@@ -298,10 +301,7 @@ impl WorkerSupervisor {
     }
 
     fn spawn_slot(&self, slot_id: usize) -> AppResult<()> {
-        let _spawn_guard = self
-            .spawn_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _spawn_guard = self.spawn_lock.lock().unwrap_or_else(|e| e.into_inner());
         {
             let guard = self.lock_inner();
             if slot_id < guard.slots.len() && guard.slots[slot_id].running {
@@ -766,7 +766,9 @@ impl WorkerSupervisor {
                         "SHUTDOWN".to_string(),
                         "Worker supervisor shutting down".to_string(),
                     );
-                    return Err(AppError::System("Worker supervisor shutting down".to_string()));
+                    return Err(AppError::System(
+                        "Worker supervisor shutting down".to_string(),
+                    ));
                 }
                 if guard
                     .queue
@@ -829,7 +831,9 @@ impl WorkerSupervisor {
                         );
                         drop(guard);
                         self.slot_notify.notify_waiters();
-                        return Err(AppError::System("Worker supervisor shutting down".to_string()));
+                        return Err(AppError::System(
+                            "Worker supervisor shutting down".to_string(),
+                        ));
                     }
                     if guard
                         .queue
@@ -942,7 +946,9 @@ impl WorkerSupervisor {
             let mut guard = self.lock_inner();
             guard.pending.remove(&id);
             guard.job_to_slot.remove(&job_id);
-            guard.queue.mark_failed(&job_id, "WORKER_SEND_FAILED".to_string(), e.to_string());
+            guard
+                .queue
+                .mark_failed(&job_id, "WORKER_SEND_FAILED".to_string(), e.to_string());
             if let Some(s) = guard.slots.get_mut(slot_idx) {
                 s.active_job_id = None;
                 s.active_cmd_id = None;

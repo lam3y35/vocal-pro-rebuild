@@ -339,7 +339,10 @@ impl AppDatabase {
             tx.commit()?;
         }
         crate::system::set_custom_ffmpeg_path(
-            defaults.get("ffmpeg_path").and_then(|v| v.as_str()).unwrap_or(""),
+            defaults
+                .get("ffmpeg_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(defaults.into_iter().collect())
     }

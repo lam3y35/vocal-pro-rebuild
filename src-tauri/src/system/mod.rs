@@ -802,7 +802,9 @@ pub fn sanitize_filename(name: &str) -> String {
     while clean.contains("..") {
         clean = clean.replace("..", "_");
     }
-    let mut trimmed = clean.trim_matches(|c: char| c.is_whitespace() || c == '.').to_string();
+    let mut trimmed = clean
+        .trim_matches(|c: char| c.is_whitespace() || c == '.')
+        .to_string();
     if trimmed.is_empty() {
         return "downloaded_media.mp3".to_string();
     }
@@ -813,9 +815,28 @@ pub fn sanitize_filename(name: &str) -> String {
         .to_uppercase();
     if matches!(
         stem_upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     ) {
         trimmed = format!("_{}", trimmed);
     }
@@ -915,8 +936,8 @@ pub fn extract_path_filename(url: &str) -> Option<String> {
 }
 
 const ALLOWED_DOWNLOAD_MEDIA_EXTS: &[&str] = &[
-    "mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif",
-    "mp4", "mkv", "webm", "avi", "mov", "m4v",
+    "mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif", "mp4", "mkv",
+    "webm", "avi", "mov", "m4v",
 ];
 
 fn is_disallowed_ip(ip: IpAddr) -> bool {
@@ -995,7 +1016,10 @@ fn validate_external_media_url(url: &str) -> AppResult<Vec<String>> {
     };
     let allow_local_urls = std::env::var("VOCALPRO_ALLOW_LOCAL_URLS").as_deref() == Ok("1");
     let after_scheme = trimmed.split_once("://").map(|x| x.1).unwrap_or("");
-    let authority = after_scheme.split(&['/', '?', '#'][..]).next().unwrap_or("");
+    let authority = after_scheme
+        .split(&['/', '?', '#'][..])
+        .next()
+        .unwrap_or("");
     if authority.contains('@') {
         return Err(AppError::InvalidInput(
             "Embedded credentials in media URL are not allowed".to_string(),
@@ -1004,7 +1028,9 @@ fn validate_external_media_url(url: &str) -> AppResult<Vec<String>> {
 
     let (raw_host, port) = if authority.starts_with('[') {
         let Some(end_bracket) = authority.find(']') else {
-            return Err(AppError::InvalidInput("Malformed IPv6 URL host".to_string()));
+            return Err(AppError::InvalidInput(
+                "Malformed IPv6 URL host".to_string(),
+            ));
         };
         let host_slice = &authority[1..end_bracket];
         let rest = &authority[end_bracket + 1..];
@@ -1017,7 +1043,9 @@ fn validate_external_media_url(url: &str) -> AppResult<Vec<String>> {
                 .filter(|p| *p > 0)
                 .ok_or_else(|| AppError::InvalidInput("Invalid URL port".to_string()))?
         } else {
-            return Err(AppError::InvalidInput("Malformed URL authority".to_string()));
+            return Err(AppError::InvalidInput(
+                "Malformed URL authority".to_string(),
+            ));
         };
         (host_slice, parsed_port)
     } else if let Some((h, port_str)) = authority.rsplit_once(':') {
@@ -1138,13 +1166,25 @@ fn resolve_relative_redirect(base_url: &str, location: &str) -> AppResult<String
     Ok(format!("{}/{}", prefix.trim_end_matches('/'), loc))
 }
 
-fn resolve_safe_media_target(initial_url: &str, max_hops: usize) -> AppResult<(String, Vec<String>)> {
+fn resolve_safe_media_target(
+    initial_url: &str,
+    max_hops: usize,
+) -> AppResult<(String, Vec<String>)> {
     let mut current = initial_url.to_string();
     for hop in 0..=max_hops {
         let pins = validate_external_media_url(&current)?;
         let mut head_cmd = Command::new("curl");
         silent_command(&mut head_cmd);
-        head_cmd.args(["-s", "-I", "--proto", "=http,https", "--max-redirs", "0", "--max-time", "6"]);
+        head_cmd.args([
+            "-s",
+            "-I",
+            "--proto",
+            "=http,https",
+            "--max-redirs",
+            "0",
+            "--max-time",
+            "6",
+        ]);
         for pin in &pins {
             head_cmd.args(["--resolve", pin]);
         }
@@ -1204,10 +1244,7 @@ fn extract_content_disposition_filename(headers: &str) -> Option<String> {
                 let p_low = p.to_ascii_lowercase();
                 if p_low.starts_with("filename*=") {
                     let raw = p[10..].trim().trim_matches('"');
-                    let stripped = raw
-                        .split_once("''")
-                        .map(|x| x.1)
-                        .unwrap_or(raw);
+                    let stripped = raw.split_once("''").map(|x| x.1).unwrap_or(raw);
                     let decoded = percent_decode_url(stripped);
                     if !decoded.trim().is_empty() {
                         return Some(decoded);
@@ -1319,7 +1356,10 @@ pub fn resolve_ffmpeg_path() -> PathBuf {
                     .extension()
                     .and_then(|e| e.to_str())
                     .map(|s| s.to_ascii_lowercase());
-                if p.is_file() && fname.contains("ffmpeg") && matches!(ext.as_deref(), None | Some("exe")) {
+                if p.is_file()
+                    && fname.contains("ffmpeg")
+                    && matches!(ext.as_deref(), None | Some("exe"))
+                {
                     return p;
                 }
             }
@@ -1547,7 +1587,13 @@ pub fn download_media_url(
     let chosen_name = custom_name
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
-        .or_else(|| if !is_generic { header_filename.clone() } else { None })
+        .or_else(|| {
+            if !is_generic {
+                header_filename.clone()
+            } else {
+                None
+            }
+        })
         .or_else(|| extract_query_filename(url))
         .or_else(|| extract_query_filename(&final_url))
         .or_else(|| extract_path_filename(&final_url))

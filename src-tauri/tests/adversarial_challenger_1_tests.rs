@@ -254,7 +254,11 @@ async fn test_adversarial_rapid_start_restart_shutdown_cycles_no_leaks() {
         #[cfg(unix)]
         {
             let old_dead = unsafe { libc::kill(pid as libc::pid_t, 0) != 0 };
-            assert!(old_dead, "Cycle {}: old PID {} should be reaped", cycle, pid);
+            assert!(
+                old_dead,
+                "Cycle {}: old PID {} should be reaped",
+                cycle, pid
+            );
         }
 
         // Shutdown worker
@@ -359,34 +363,35 @@ for line in sys.stdin:
     fs::write(worker_pkg.join("__main__.py"), main_py_code).unwrap();
 
     let models_dir = tmp.path().join("models");
-    let supervisor = WorkerSupervisor::new(
-        python_bin(),
-        mock_pkg_dir.clone(),
-        false,
-        models_dir,
-    );
+    let supervisor = WorkerSupervisor::new(python_bin(), mock_pkg_dir.clone(), false, models_dir);
 
     // Wrap startup with a 5-second timeout.
     // If the pipe deadlock defect is present, it will hang indefinitely and trigger timeout.
-    let start_res = tokio::time::timeout(Duration::from_secs(5), async {
-        supervisor.start()
-    })
-    .await;
+    let start_res =
+        tokio::time::timeout(Duration::from_secs(5), async { supervisor.start() }).await;
 
     assert!(
         start_res.is_ok(),
         "Supervisor startup timed out! Pipe deadlock occurred while reading stdout before stderr!"
     );
 
-    let health = start_res.unwrap().expect("Supervisor should start cleanly despite 128KB stderr flood");
+    let health = start_res
+        .unwrap()
+        .expect("Supervisor should start cleanly despite 128KB stderr flood");
     assert!(health.running);
     assert_eq!(health.worker_version, "3.0.0");
     assert_eq!(health.torch_version, "2.4.0");
 
     // Verify stderr was actively drained and buffered into logs
     let logs = supervisor.recent_logs();
-    println!("[ADV_TEST] Collected recent log lines count: {}", logs.len());
-    assert!(!logs.is_empty(), "Recent logs should contain drained stderr messages");
+    println!(
+        "[ADV_TEST] Collected recent log lines count: {}",
+        logs.len()
+    );
+    assert!(
+        !logs.is_empty(),
+        "Recent logs should contain drained stderr messages"
+    );
     let has_heavy_stderr = logs.iter().any(|l| l.contains("HEAVY_STDERR_"));
     assert!(
         has_heavy_stderr,
@@ -429,15 +434,13 @@ sys.exit(1)
     fs::write(worker_pkg.join("__main__.py"), crash_code).unwrap();
 
     let models_dir = tmp.path().join("models");
-    let supervisor = WorkerSupervisor::new(
-        python_bin(),
-        mock_pkg_dir,
-        false,
-        models_dir,
-    );
+    let supervisor = WorkerSupervisor::new(python_bin(), mock_pkg_dir, false, models_dir);
 
     let start_res = supervisor.start();
-    assert!(start_res.is_err(), "Supervisor should fail on premature worker exit");
+    assert!(
+        start_res.is_err(),
+        "Supervisor should fail on premature worker exit"
+    );
 
     let err_str = format!("{}", start_res.err().unwrap());
     println!("[ADV_TEST] Premature exit error string:\n{}", err_str);

@@ -22,10 +22,11 @@ pub fn run_legacy_migration(
     extra_config_paths: &[PathBuf],
     output_scan_roots: &[PathBuf],
 ) -> AppResult<MigrationReport> {
-    let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM schema_version WHERE version >= 1", [], |row| {
-            row.get(0)
-        })?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_version WHERE version >= 1",
+        [],
+        |row| row.get(0),
+    )?;
     if count > 0 {
         return Ok(MigrationReport {
             already_migrated: true,

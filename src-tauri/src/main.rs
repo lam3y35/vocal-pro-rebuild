@@ -262,7 +262,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ctx = ctx.clone();
                 move |_window, event| match event {
                     tauri::WindowEvent::Destroyed | tauri::WindowEvent::CloseRequested { .. } => {
-                        eprintln!("[SHUTDOWN] Window close/destroyed event — terminating AI worker pool");
+                        eprintln!(
+                            "[SHUTDOWN] Window close/destroyed event — terminating AI worker pool"
+                        );
                         ctx.worker.shutdown();
                     }
                     _ => {}

@@ -316,11 +316,7 @@ impl LiveStemMixer {
         stems
             .iter()
             .map(|s| {
-                let active = if any_solo {
-                    s.solo && !s.mute
-                } else {
-                    !s.mute
-                };
+                let active = if any_solo { s.solo && !s.mute } else { !s.mute };
                 (s.name.clone(), if active { s.gain } else { 0.0 })
             })
             .collect()
@@ -618,11 +614,17 @@ mod tests {
         mixer.set_stem_mute("vocals", true);
 
         let offline = mixer.render_full_mix(None);
-        assert!(offline.iter().all(|&s| s == 0.0), "muted+solo stem must be silent offline");
+        assert!(
+            offline.iter().all(|&s| s == 0.0),
+            "muted+solo stem must be silent offline"
+        );
 
         mixer.playing.store(true, Ordering::Relaxed);
         let mut live = vec![0.0_f32; 256];
         mixer.render_interleaved_frames(&mut live);
-        assert!(live.iter().all(|&s| s == 0.0), "muted+solo stem must be silent in live callback");
+        assert!(
+            live.iter().all(|&s| s == 0.0),
+            "muted+solo stem must be silent in live callback"
+        );
     }
 }

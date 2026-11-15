@@ -207,7 +207,8 @@ impl AppContext {
         }
 
         let models_dir = resolve_models_dir(&app_data_dir);
-        let worker = WorkerSupervisor::new(python_bin, worker_pythonpath, fast_test_model, models_dir);
+        let worker =
+            WorkerSupervisor::new(python_bin, worker_pythonpath, fast_test_model, models_dir);
         if let Ok(resumable) = db.load_resumable_jobs() {
             if !resumable.is_empty() {
                 worker.restore_jobs(resumable);
@@ -227,19 +228,11 @@ impl AppContext {
     }
 
     pub fn set_launch_files(&self, files: Vec<String>) {
-        *self
-            .launch_files
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = files;
+        *self.launch_files.lock().unwrap_or_else(|e| e.into_inner()) = files;
     }
 
     pub fn take_launch_files(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .launch_files
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        )
+        std::mem::take(&mut *self.launch_files.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub fn resolve_sample_track_path(&self) -> String {
@@ -504,7 +497,9 @@ impl AppContext {
         output_midi_path: String,
     ) -> AppResult<(String, u32)> {
         if stem_path.trim().is_empty() {
-            return Err(AppError::InvalidInput("Input stem path cannot be empty".to_string()));
+            return Err(AppError::InvalidInput(
+                "Input stem path cannot be empty".to_string(),
+            ));
         }
         let clean_out = sanitize_export_target_path(&output_midi_path, &["mid", "midi"], "mid")?;
         let ev = self
@@ -545,10 +540,13 @@ impl AppContext {
             .await?;
 
         match ev {
-            WorkerEvent::CalibrationDone { mut calibration, .. } => {
+            WorkerEvent::CalibrationDone {
+                mut calibration, ..
+            } => {
                 if let Some(obj) = calibration.as_object_mut() {
                     if !obj.contains_key("elapsed_ms") {
-                        if let Some(secs) = obj.get("inference_elapsed_s").and_then(|v| v.as_f64()) {
+                        if let Some(secs) = obj.get("inference_elapsed_s").and_then(|v| v.as_f64())
+                        {
                             obj.insert(
                                 "elapsed_ms".to_string(),
                                 Value::from((secs * 1000.0 * 10.0).round() / 10.0),
@@ -827,9 +825,9 @@ impl AppContext {
                 base_models.to_string_lossy().as_ref(),
             );
 
-        let output = cmd.output().map_err(|e| {
-            AppError::System(format!("Failed to launch model installer: {}", e))
-        })?;
+        let output = cmd
+            .output()
+            .map_err(|e| AppError::System(format!("Failed to launch model installer: {}", e)))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -854,7 +852,9 @@ impl AppContext {
     pub fn save_preset(&self, name: &str, config: &Value) -> AppResult<()> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
-            return Err(AppError::InvalidInput("Preset name cannot be empty".to_string()));
+            return Err(AppError::InvalidInput(
+                "Preset name cannot be empty".to_string(),
+            ));
         }
         self.db.save_preset(trimmed, config)
     }
@@ -1041,17 +1041,17 @@ impl AppContext {
                 Ok(Ok(rec)) => records.push(rec),
                 Ok(Err(err)) => {
                     eprintln!("[BATCH_WARN] Job for file '{}' failed: {}", input_file, err);
-                    let existing_rec = self
-                        .worker
-                        .list_jobs()
-                        .into_iter()
-                        .rev()
-                        .find(|j| j.input_path == input_file && j.status == crate::worker::job_queue::JobStatus::Failed);
+                    let existing_rec = self.worker.list_jobs().into_iter().rev().find(|j| {
+                        j.input_path == input_file
+                            && j.status == crate::worker::job_queue::JobStatus::Failed
+                    });
                     if let Some(rec) = existing_rec {
                         records.push(rec);
                     } else {
                         let (code, msg) = match &err {
-                            AppError::Worker { code, message, .. } => (code.clone(), message.clone()),
+                            AppError::Worker { code, message, .. } => {
+                                (code.clone(), message.clone())
+                            }
                             _ => ("BATCH_ERROR".to_string(), err.to_string()),
                         };
                         let rec = JobRecord {
@@ -1082,7 +1082,10 @@ impl AppContext {
                     }
                 }
                 Err(join_err) => {
-                    eprintln!("[BATCH_WARN] Task join error for file '{}': {}", input_file, join_err);
+                    eprintln!(
+                        "[BATCH_WARN] Task join error for file '{}': {}",
+                        input_file, join_err
+                    );
                     let rec = JobRecord {
                         job_id: uuid::Uuid::new_v4().to_string(),
                         input_path: input_file,
