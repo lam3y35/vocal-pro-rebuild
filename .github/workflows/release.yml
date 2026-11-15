@@ -53,14 +53,17 @@ jobs:
           Expand-Archive -Path $pyZip -DestinationPath dist\bundle\engine -Force
           Remove-Item $pyZip
 
-          # 2. Enable site-packages in python311._pth
+          # 2. Enable site-packages and VocalPro worker path in python311._pth
+          # Note: Windows embeddable Python ignores PYTHONPATH whenever a ._pth file exists.
           $pthFile = "dist\bundle\engine\python311._pth"
           if (Test-Path $pthFile) {
               $content = Get-Content $pthFile
               $content = $content -replace '#import site', 'import site'
-              $content += "`n."
-              $content += "`nLib\site-packages"
-              $content | Set-Content $pthFile
+              $content += "."
+              $content += "Lib\site-packages"
+              $content += "..\worker"
+              $content += "..\..\worker"
+              $content | Set-Content -Encoding Ascii $pthFile
           }
 
           # 3. Bootstrap pip into embeddable runtime
