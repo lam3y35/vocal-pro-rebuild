@@ -62,7 +62,7 @@ jobs:
               $content += "."
               $content += "Lib\site-packages"
               $content += "..\worker"
-              $content += "..\..\worker"
+              $content += "..\..\..\worker"
               $content | Set-Content -Encoding Ascii $pthFile
           }
 
