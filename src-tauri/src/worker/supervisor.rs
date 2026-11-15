@@ -414,7 +414,7 @@ impl WorkerSupervisor {
             let _ = handshake_tx.send(res);
         });
         let (stdout_reader, first_line) =
-            match handshake_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            match handshake_rx.recv_timeout(std::time::Duration::from_secs(90)) {
                 Ok(Ok((reader, line))) => (reader, line),
                 Ok(Err(e)) => {
                     let _ = child.kill();
@@ -425,7 +425,7 @@ impl WorkerSupervisor {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(self.record_startup_failure(format!(
-                        "Worker slot {} startup handshake timed out after 30s.",
+                        "Worker slot {} startup handshake timed out after 90s.",
                         slot_id
                     )));
                 }
