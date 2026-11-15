@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlparse
 
 CHUNK = 1 << 20
 
@@ -52,6 +53,25 @@ def expected_prefix_from_name(filename: str) -> Optional[str]:
     return None
 
 
+def _is_allowed_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme == "https" and bool(parsed.hostname):
+        return True
+    if parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost"):
+        return True
+    return False
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_allowed_url(newurl):
+            raise ModelInstallError("DISALLOWED_URL", f"Disallowed redirect target: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def download_verified(
     url: str,
     dest: Path,
@@ -60,6 +80,8 @@ def download_verified(
     timeout: float = 30.0,
 ) -> Path:
     """Download ``url`` to ``dest`` with resume + checksum verification + atomic rename."""
+    if not _is_allowed_url(url):
+        raise ModelInstallError("DISALLOWED_URL", f"Only https:// or local test URLs are allowed: {url}")
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     expected = (expected_sha256 or expected_prefix_from_name(dest.name) or "").lower()
@@ -71,8 +93,9 @@ def download_verified(
     req = urllib.request.Request(url, headers={"User-Agent": "VocalPro-installer/1.0"})
     if have:
         req.add_header("Range", f"bytes={have}-")
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310 - https URL from pinned list / local test server
+        resp = opener.open(req, timeout=timeout)  # noqa: S310 - scheme & hostname verified via urlparse + SafeRedirectHandler
     except urllib.error.HTTPError as exc:
         if exc.code == 416 and part.exists():  # already complete on the server side
             resp = None
@@ -166,7 +189,8 @@ def verify_installed(model_name: str, target: Optional[Path] = None) -> dict[str
         if not p.exists():
             report[name] = "MISSING"
         else:
-            report[name] = "OK" if sha256_file(p).startswith(expected_prefix_from_name(name) or "") else "CORRUPT"
+            prefix = expected_prefix_from_name(name)
+            report[name] = "OK" if (prefix is not None and sha256_file(p).startswith(prefix.lower())) else "CORRUPT"
     return report
 
 

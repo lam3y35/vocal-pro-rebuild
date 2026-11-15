@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
 
 import librosa
 import numpy as np
 import scipy.ndimage
+
+from .engine import resolve_ffmpeg
 
 
 def stem_to_midi_file(stem_path: str | Path, output_midi_path: str | Path) -> int:
@@ -19,6 +22,13 @@ def stem_to_midi_file(stem_path: str | Path, output_midi_path: str | Path) -> in
     - Minimum note duration: 3 frames (~69.7 ms)
     - 480 ticks/beat, 120 BPM (500,000 us/quarter-note), velocity 100
     """
+    ffmpeg_bin = resolve_ffmpeg()
+    if ffmpeg_bin and Path(ffmpeg_bin).is_file():
+        ffmpeg_dir = str(Path(ffmpeg_bin).parent)
+        cur_path = os.environ.get("PATH", "")
+        if ffmpeg_dir not in cur_path.split(os.pathsep):
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + cur_path
+
     y, sr = librosa.load(str(stem_path), sr=22050, mono=True)
     if len(y) == 0:
         raise ValueError(f"Empty audio file: {stem_path}")

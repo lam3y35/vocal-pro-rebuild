@@ -5,16 +5,19 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::audio::export::{export_separate_custom_stems, export_stem_mix};
+use crate::audio::export::{
+    export_separate_custom_stems_with_pans, export_stem_mix, export_stem_mix_to_file,
+    export_stem_mix_with_pans, write_pcm16_wav,
+};
 use crate::audio::mixer::{discover_stems_in_folder, LiveStemMixer, MixerSnapshot};
 use crate::audio::waveform::{compute_waveform_8000, WaveformSummary};
 use crate::db::{AppDatabase, DownloadHistoryEntry, OutputFolderEntry, SeparationHistoryEntry};
 use crate::error::{AppError, AppResult};
-use crate::models::{list_supported_models, ModelInfo};
+use crate::models::{list_supported_models_in_dirs, ModelInfo};
 use crate::system::{
     create_desktop_shortcut, detect_system_hardware_with_mode, download_media_url,
-    export_diagnostic_bundle, get_changelog_releases, register_file_associations, ChangelogRelease,
-    HardwareProfile,
+    export_diagnostic_bundle, get_changelog_releases, register_file_associations,
+    set_custom_ffmpeg_path, silent_command, ChangelogRelease, HardwareProfile,
 };
 use crate::worker::job_queue::JobRecord;
 use crate::worker::protocol::{HostCommandPayload, JobOptions, WorkerEvent};
@@ -37,9 +40,147 @@ pub struct AppContext {
     pub db: AppDatabase,
     pub worker: WorkerSupervisor,
     pub active_mixer: Arc<Mutex<Option<Arc<LiveStemMixer>>>>,
+    pub launch_files: Arc<Mutex<Vec<String>>>,
+}
+
+fn dir_has_model_assets(dir: &Path) -> bool {
+    let has_assets = |p: &Path| -> bool {
+        if !p.is_dir() {
+            return false;
+        }
+        std::fs::read_dir(p)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("th") || e.eq_ignore_ascii_case("yaml"))
+                    .unwrap_or(false)
+            })
+    };
+    has_assets(dir) || has_assets(&dir.join("checkpoints"))
+}
+
+fn candidate_models_dirs(app_data_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(local_app) = std::env::var("LOCALAPPDATA") {
+        if !local_app.trim().is_empty() {
+            dirs.push(PathBuf::from(local_app).join("VocalPro").join("models"));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            dirs.push(exe_dir.join("models"));
+        }
+    }
+    dirs.push(app_data_dir.join("models"));
+    dirs
+}
+
+fn resolve_models_dir(app_data_dir: &Path) -> PathBuf {
+    if let Ok(env_dir) = std::env::var("VOCALPRO_MODELS_DIR") {
+        if !env_dir.trim().is_empty() {
+            return PathBuf::from(env_dir);
+        }
+    }
+    let candidates = candidate_models_dirs(app_data_dir);
+    if let Some(found) = candidates.iter().find(|d| dir_has_model_assets(d)) {
+        return found.clone();
+    }
+    if let Ok(local_app) = std::env::var("LOCALAPPDATA") {
+        if !local_app.trim().is_empty() {
+            let local_models = PathBuf::from(local_app).join("VocalPro").join("models");
+            if local_models.is_dir() {
+                return local_models;
+            }
+        }
+    }
+    app_data_dir.join("models")
+}
+
+pub(crate) fn sanitize_export_target_path(
+    raw: &str,
+    allowed_exts: &[&str],
+    default_ext: &str,
+) -> AppResult<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Export output path cannot be empty".to_string(),
+        ));
+    }
+    let path = Path::new(trimmed);
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(AppError::InvalidInput(
+            "Path traversal ('..') is not allowed in export paths".to_string(),
+        ));
+    }
+    let ext_ok = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| allowed_exts.iter().any(|a| e.eq_ignore_ascii_case(a)))
+        .unwrap_or(false);
+    if ext_ok {
+        Ok(path.to_path_buf())
+    } else {
+        let mut os = path.as_os_str().to_os_string();
+        os.push(".");
+        os.push(default_ext);
+        Ok(PathBuf::from(os))
+    }
+}
+
+fn ensure_sample_track_file(app_data_dir: &Path) -> PathBuf {
+    let repo_sample = Path::new("benchmarks/reference-set/track_01_pop_stereo_44k.wav");
+    if repo_sample.is_file() {
+        return repo_sample.to_path_buf();
+    }
+    let sample_path = app_data_dir
+        .join("samples")
+        .join("track_01_pop_stereo_44k.wav");
+    if !sample_path.is_file() {
+        // Synthesize a clean 3-second stereo demo WAV so onboarding quick-start works
+        // in installed desktop builds where workspace benchmark files are absent.
+        let sample_rate = 44_100_u32;
+        let total_frames = sample_rate as usize * 3;
+        let mut interleaved = Vec::with_capacity(total_frames * 2);
+        let two_pi = 2.0 * std::f32::consts::PI;
+        for i in 0..total_frames {
+            let t = i as f32 / sample_rate as f32;
+            let beat = ((t * 2.0).fract() * 3.0).min(1.0);
+            let pulse = 1.0 - (t * 2.0).fract() * 0.45;
+            let env = beat * pulse;
+            let vocals = 0.28 * (two_pi * 440.0 * t).sin() + 0.14 * (two_pi * 554.37 * t).sin();
+            let bass = 0.24 * (two_pi * 110.0 * t).sin();
+            let shimmer = 0.12 * (two_pi * 659.25 * t).sin();
+            interleaved.push(((vocals + bass + shimmer * 0.6) * env).clamp(-0.9, 0.9));
+            interleaved.push(((vocals + bass + shimmer * 1.1) * env).clamp(-0.9, 0.9));
+        }
+        let _ = write_pcm16_wav(&interleaved, sample_rate, 2, &sample_path);
+    }
+    sample_path
 }
 
 impl AppContext {
+    fn resolve_sample_input_path(&self, input_path: &str) -> String {
+        let normalized = input_path.trim().replace('\\', "/");
+        if normalized == "benchmarks/reference-set/track_01_pop_stereo_44k.wav"
+            && !Path::new(input_path).is_file()
+        {
+            return ensure_sample_track_file(&self.app_data_dir)
+                .to_string_lossy()
+                .to_string();
+        }
+        input_path.to_string()
+    }
+
     pub fn new(
         app_data_dir: PathBuf,
         python_bin: PathBuf,
@@ -59,13 +200,20 @@ impl AppContext {
         let default_outputs_dir = app_data_dir.join("output_vocals");
         let _ = db.migrate_legacy(&app_data_dir, &extra_cfgs, &[default_outputs_dir]);
 
-        let models_dir = std::env::var("VOCALPRO_MODELS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| app_data_dir.join("models"));
+        if let Ok(settings) = db.get_all_settings() {
+            if let Some(ffmpeg_path) = settings.get("ffmpeg_path").and_then(|v| v.as_str()) {
+                set_custom_ffmpeg_path(ffmpeg_path);
+            }
+        }
+
+        let models_dir = resolve_models_dir(&app_data_dir);
         let worker = WorkerSupervisor::new(python_bin, worker_pythonpath, fast_test_model, models_dir);
         if let Ok(resumable) = db.load_resumable_jobs() {
             if !resumable.is_empty() {
                 worker.restore_jobs(resumable);
+                for rec in worker.list_jobs() {
+                    let _ = db.upsert_job_record(&rec);
+                }
             }
         }
 
@@ -74,7 +222,30 @@ impl AppContext {
             db,
             worker,
             active_mixer: Arc::new(Mutex::new(None)),
+            launch_files: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    pub fn set_launch_files(&self, files: Vec<String>) {
+        *self
+            .launch_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = files;
+    }
+
+    pub fn take_launch_files(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .launch_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+    }
+
+    pub fn resolve_sample_track_path(&self) -> String {
+        ensure_sample_track_file(&self.app_data_dir)
+            .to_string_lossy()
+            .to_string()
     }
 
     pub fn start_worker(&self) -> AppResult<WorkerHealth> {
@@ -99,6 +270,7 @@ impl AppContext {
         output_dir: String,
         options: JobOptions,
     ) -> AppResult<JobRecord> {
+        let input_path = self.resolve_sample_input_path(&input_path);
         let job_id = uuid::Uuid::new_v4().to_string();
         let model_name = options.model.clone();
         let device_name = options.device.clone();
@@ -264,10 +436,12 @@ impl AppContext {
     }
 
     pub fn fast_waveform(&self, audio_path: &str) -> AppResult<WaveformSummary> {
-        compute_waveform_8000(Path::new(audio_path))
+        let resolved = self.resolve_sample_input_path(audio_path);
+        compute_waveform_8000(Path::new(&resolved))
     }
 
     pub async fn analyze_audio(&self, audio_path: String) -> AppResult<AnalysisResult> {
+        let audio_path = self.resolve_sample_input_path(&audio_path);
         let ev = self
             .worker
             .request(HostCommandPayload::Analyze {
@@ -284,9 +458,15 @@ impl AppContext {
                 waveform,
                 ..
             } => {
-                if let Some(parent) = Path::new(&audio_path).parent() {
+                let target_path = Path::new(&audio_path);
+                let output_folder = if target_path.is_dir() {
+                    Some(target_path)
+                } else {
+                    target_path.parent()
+                };
+                if let Some(folder) = output_folder {
                     let _ = self.db.update_output_analysis(
-                        &parent.to_string_lossy(),
+                        &folder.to_string_lossy(),
                         bpm,
                         &key,
                         &scale,
@@ -323,11 +503,15 @@ impl AppContext {
         stem_path: String,
         output_midi_path: String,
     ) -> AppResult<(String, u32)> {
+        if stem_path.trim().is_empty() {
+            return Err(AppError::InvalidInput("Input stem path cannot be empty".to_string()));
+        }
+        let clean_out = sanitize_export_target_path(&output_midi_path, &["mid", "midi"], "mid")?;
         let ev = self
             .worker
             .request(HostCommandPayload::StemToMidi {
                 stem_path,
-                output_midi_path,
+                output_midi_path: clean_out.to_string_lossy().to_string(),
             })
             .await?;
 
@@ -361,7 +545,25 @@ impl AppContext {
             .await?;
 
         match ev {
-            WorkerEvent::CalibrationDone { calibration, .. } => {
+            WorkerEvent::CalibrationDone { mut calibration, .. } => {
+                if let Some(obj) = calibration.as_object_mut() {
+                    if !obj.contains_key("elapsed_ms") {
+                        if let Some(secs) = obj.get("inference_elapsed_s").and_then(|v| v.as_f64()) {
+                            obj.insert(
+                                "elapsed_ms".to_string(),
+                                Value::from((secs * 1000.0 * 10.0).round() / 10.0),
+                            );
+                        }
+                    }
+                    if !obj.contains_key("throughput_x_realtime") {
+                        if let Some(rf) = obj.get("realtime_factor").and_then(|v| v.as_f64()) {
+                            obj.insert(
+                                "throughput_x_realtime".to_string(),
+                                Value::from((rf * 100.0).round() / 100.0),
+                            );
+                        }
+                    }
+                }
                 let mut updates = HashMap::new();
                 updates.insert("hardware_calibration_json".to_string(), calibration.clone());
                 if let Some(jobs) = calibration
@@ -409,6 +611,15 @@ impl AppContext {
         Ok(mixer.snapshot())
     }
 
+    pub fn mixer_set_pan(&self, stem_name: &str, pan: f32) -> AppResult<MixerSnapshot> {
+        let guard = self.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
+        let mixer = guard
+            .as_ref()
+            .ok_or_else(|| AppError::InvalidInput("No folder loaded in mixer".to_string()))?;
+        mixer.set_stem_pan(stem_name, pan);
+        Ok(mixer.snapshot())
+    }
+
     pub fn mixer_set_mute(&self, stem_name: &str, mute: bool) -> AppResult<MixerSnapshot> {
         let guard = self.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
         let mixer = guard
@@ -427,6 +638,15 @@ impl AppContext {
         Ok(mixer.snapshot())
     }
 
+    pub fn mixer_seek(&self, position_sec: f64) -> AppResult<MixerSnapshot> {
+        let guard = self.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
+        let mixer = guard
+            .as_ref()
+            .ok_or_else(|| AppError::InvalidInput("No folder loaded in mixer".to_string()))?;
+        mixer.seek_seconds(position_sec.max(0.0));
+        Ok(mixer.snapshot())
+    }
+
     pub fn mixer_export_mix(
         &self,
         folder_path: &str,
@@ -438,6 +658,50 @@ impl AppContext {
         Ok(out.to_string_lossy().to_string())
     }
 
+    pub fn mixer_export_mix_to_file(
+        &self,
+        folder_path: &str,
+        target_path: &str,
+        volumes: &HashMap<String, f32>,
+        format: &str,
+        bitrate: &str,
+    ) -> AppResult<String> {
+        let out = export_stem_mix_to_file(
+            Path::new(folder_path),
+            Path::new(target_path),
+            volumes,
+            format,
+            bitrate,
+        )?;
+        Ok(out.to_string_lossy().to_string())
+    }
+
+    pub fn mixer_export_mix_with_pans(
+        &self,
+        folder_path: &str,
+        target_path: Option<&str>,
+        volumes: &HashMap<String, f32>,
+        pans: Option<&HashMap<String, f32>>,
+        format: &str,
+        bitrate: &str,
+    ) -> AppResult<String> {
+        let ext = format.trim_start_matches('.').to_lowercase();
+        let default_target = Path::new(folder_path).join(format!("stem_mix.{}", ext));
+        let dest = target_path
+            .filter(|p| !p.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(default_target);
+        let out = export_stem_mix_with_pans(
+            Path::new(folder_path),
+            &dest,
+            volumes,
+            pans,
+            format,
+            bitrate,
+        )?;
+        Ok(out.to_string_lossy().to_string())
+    }
+
     pub fn mixer_export_separate(
         &self,
         folder_path: &str,
@@ -445,7 +709,24 @@ impl AppContext {
         format: &str,
         bitrate: &str,
     ) -> AppResult<Vec<String>> {
-        let outs = export_separate_custom_stems(Path::new(folder_path), volumes, format, bitrate)?;
+        self.mixer_export_separate_with_pans(folder_path, volumes, None, format, bitrate)
+    }
+
+    pub fn mixer_export_separate_with_pans(
+        &self,
+        folder_path: &str,
+        volumes: &HashMap<String, f32>,
+        pans: Option<&HashMap<String, f32>>,
+        format: &str,
+        bitrate: &str,
+    ) -> AppResult<Vec<String>> {
+        let outs = export_separate_custom_stems_with_pans(
+            Path::new(folder_path),
+            volumes,
+            pans,
+            format,
+            bitrate,
+        )?;
         Ok(outs
             .into_iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -484,16 +765,102 @@ impl AppContext {
         let (title, path, format) = download_media_url(url, &downloads_dir, custom_name)?;
         let path_str = path.to_string_lossy().to_string();
         self.db
-            .record_download_history(&title, url, &path_str, &format, "Original")?;
-        let list = self.db.list_download_history()?;
-        list.into_iter()
-            .next()
-            .ok_or_else(|| AppError::System("Failed to read download history record".to_string()))
+            .record_download_history(&title, url, &path_str, &format, "Original")
     }
 
     pub fn list_models(&self) -> Vec<ModelInfo> {
-        let ckpt_dir = dirs::cache_dir().map(|d| d.join("torch/hub/checkpoints"));
-        list_supported_models(ckpt_dir.as_deref())
+        let mut search_dirs = vec![
+            self.models_dir().to_path_buf(),
+            self.models_dir().join("checkpoints"),
+        ];
+        for cand in candidate_models_dirs(&self.app_data_dir) {
+            search_dirs.push(cand.join("checkpoints"));
+            search_dirs.push(cand);
+        }
+        if let Some(cache) = dirs::cache_dir() {
+            search_dirs.push(cache.join("torch/hub/checkpoints"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            search_dirs.push(home.join(".cache/torch/hub/checkpoints"));
+        }
+        let dir_refs: Vec<&Path> = search_dirs.iter().map(|p| p.as_path()).collect();
+        list_supported_models_in_dirs(&dir_refs)
+    }
+
+    pub fn download_model(&self, model_id: &str) -> AppResult<Vec<ModelInfo>> {
+        let trimmed = model_id.trim();
+        const SUPPORTED: &[&str] = &[
+            "htdemucs",
+            "htdemucs_ft",
+            "htdemucs_6s",
+            "hdemucs_mmi",
+            "mdx",
+            "mdx_extra",
+            "mdx_q",
+            "mdx_extra_q",
+        ];
+        if !SUPPORTED.contains(&trimmed) {
+            return Err(AppError::InvalidInput(format!(
+                "Unsupported Demucs model id: {}",
+                trimmed
+            )));
+        }
+
+        let base_models = self.models_dir();
+        let target_dir = if base_models.file_name().and_then(|s| s.to_str()) == Some("checkpoints")
+        {
+            base_models.to_path_buf()
+        } else {
+            base_models.join("checkpoints")
+        };
+        std::fs::create_dir_all(&target_dir)?;
+
+        let mut cmd = std::process::Command::new(self.worker.python_bin());
+        silent_command(&mut cmd);
+        cmd.args(["-m", "vocalpro_worker.model_installer", trimmed, "--target"])
+            .arg(&target_dir)
+            .env("PYTHONPATH", self.worker.worker_pythonpath())
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
+            .env(
+                "VOCALPRO_MODELS_DIR",
+                base_models.to_string_lossy().as_ref(),
+            );
+
+        let output = cmd.output().map_err(|e| {
+            AppError::System(format!("Failed to launch model installer: {}", e))
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            return Err(AppError::System(format!(
+                "Model download failed for '{}': {}",
+                trimmed, detail
+            )));
+        }
+
+        Ok(self.list_models())
+    }
+
+    pub fn list_presets(&self) -> AppResult<Vec<(String, Value)>> {
+        self.db.list_presets()
+    }
+
+    pub fn save_preset(&self, name: &str, config: &Value) -> AppResult<()> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::InvalidInput("Preset name cannot be empty".to_string()));
+        }
+        self.db.save_preset(trimmed, config)
+    }
+
+    pub fn delete_preset(&self, name: &str) -> AppResult<()> {
+        self.db.delete_preset(name)
     }
 
     pub fn register_associations(&self) -> AppResult<bool> {
@@ -522,10 +889,11 @@ impl AppContext {
     }
 
     pub fn save_settings(&self, updates: &HashMap<String, Value>) -> AppResult<()> {
+        self.db.update_settings(updates)?;
         if let Some(max_jobs) = updates.get("max_concurrent_jobs").and_then(|v| v.as_u64()) {
             self.worker.set_max_concurrent_workers(max_jobs as usize);
         }
-        self.db.update_settings(updates)
+        Ok(())
     }
 
     pub fn reset_setting_key(&self, key: &str) -> AppResult<Value> {
@@ -541,7 +909,11 @@ impl AppContext {
     }
 
     pub fn import_settings_json(&self, raw_json: &str) -> AppResult<HashMap<String, Value>> {
-        self.db.import_settings_json(raw_json)
+        let updated = self.db.import_settings_json(raw_json)?;
+        if let Some(max_jobs) = updated.get("max_concurrent_jobs").and_then(|v| v.as_u64()) {
+            self.worker.set_max_concurrent_workers(max_jobs as usize);
+        }
+        Ok(updated)
     }
 
     pub fn set_max_concurrent_jobs(&self, max_jobs: usize) -> AppResult<WorkerHealth> {

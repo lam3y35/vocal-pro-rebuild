@@ -89,6 +89,12 @@ jobs:
           # 7. Copy native Tauri executable to bundle
           Copy-Item src-tauri\target\release\vocalpro.exe -Destination dist\bundle\vocalpro.exe
 
+          # 8. Sync release folder & rebuild portable ZIP archive
+          Copy-Item src-tauri\target\release\vocalpro.exe -Destination release\vocalpro.exe -Force
+          New-Item -ItemType Directory -Path release\worker\vocalpro_worker -Force | Out-Null
+          Copy-Item worker\vocalpro_worker\*.py -Destination release\worker\vocalpro_worker\ -Force
+          Compress-Archive -Path release\vocalpro.exe, release\Start-VocalPro.bat, release\README.md, release\worker -DestinationPath release\VocalPro-v3.0.0-Windows.zip -Force
+
       - name: Compile Inno Setup Installer
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
@@ -108,7 +114,6 @@ jobs:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v3.0.0' }}
           files: |
             dist/installer/*.exe
-            dist/bundle/vocalpro.exe
             release/VocalPro-v3.0.0-Windows.zip
           name: VocalPro v3.0.0 Windows All-in-One
           draft: false

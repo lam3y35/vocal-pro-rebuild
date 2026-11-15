@@ -15,14 +15,21 @@ pub struct ModelInfo {
 }
 
 pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<ModelInfo> {
-    let defs = [
+    match torch_hub_checkpoints_dir {
+        Some(dir) => list_supported_models_in_dirs(&[dir]),
+        None => list_supported_models_in_dirs(&[]),
+    }
+}
+
+pub fn list_supported_models_in_dirs(search_dirs: &[&Path]) -> Vec<ModelInfo> {
+    let defs: [(&str, &str, &str, Vec<&str>, f32, &[&str]); 8] = [
         (
             "htdemucs",
             "HTDemucs (Fast & Balanced)",
             "Hybrid Transformer Demucs v4 — default balanced 4-stem model.",
             vec!["vocals", "drums", "bass", "other"],
             1.0_f32,
-            "955717e8-8726e21a.th",
+            &["955717e8-8726e21a.th"],
         ),
         (
             "htdemucs_ft",
@@ -30,7 +37,12 @@ pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<Mo
             "Bag of 4 specialist fine-tuned Hybrid Transformer models (~4x compute, highest vocal SDR).",
             vec!["vocals", "drums", "bass", "other"],
             4.0_f32,
-            "f7e0c4bc-ba3fe64a.th",
+            &[
+                "f7e0c4bc-ba3fe64a.th",
+                "d12395a8-e57c48e6.th",
+                "92cfc3b6-ef3bcb9c.th",
+                "04573f0d-f3cf25b2.th",
+            ],
         ),
         (
             "htdemucs_6s",
@@ -38,7 +50,7 @@ pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<Mo
             "6-stem separation: vocals, drums, bass, guitar, piano, and other.",
             vec!["vocals", "drums", "bass", "guitar", "piano", "other"],
             1.2_f32,
-            "5c90dfd2-34c22ccb.th",
+            &["5c90dfd2-34c22ccb.th"],
         ),
         (
             "hdemucs_mmi",
@@ -46,7 +58,7 @@ pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<Mo
             "Hybrid Demucs v3 trained on MUSDB + extra MMI dataset.",
             vec!["vocals", "drums", "bass", "other"],
             1.0_f32,
-            "75fc33f5-1941ce65.th",
+            &["75fc33f5-1941ce65.th"],
         ),
         (
             "mdx",
@@ -54,7 +66,12 @@ pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<Mo
             "MDX-Challenge Hybrid Demucs model.",
             vec!["vocals", "drums", "bass", "other"],
             1.5_f32,
-            "0d19c1c6-0f06f20e.th",
+            &[
+                "0d19c1c6-0f06f20e.th",
+                "7ecf8ec1-70f50cc9.th",
+                "c511e2ab-fe698775.th",
+                "7d865c68-3d5dd56b.th",
+            ],
         ),
         (
             "mdx_extra",
@@ -62,7 +79,12 @@ pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<Mo
             "MDX-Net trained with extra data (used in Ensemble Mode alongside htdemucs_ft).",
             vec!["vocals", "drums", "bass", "other"],
             2.0_f32,
-            "e51eebcc-c1b80bdd.th",
+            &[
+                "e51eebcc-c1b80bdd.th",
+                "a1d90b5c-ae9d2452.th",
+                "5d2d6c55-db83574e.th",
+                "cfa93e08-61801ae1.th",
+            ],
         ),
         (
             "mdx_q",
@@ -70,7 +92,12 @@ pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<Mo
             "Quantized MDX model with smaller disk/memory footprint.",
             vec!["vocals", "drums", "bass", "other"],
             1.1_f32,
-            "6b9c2ca1-3fd82607.th",
+            &[
+                "6b9c2ca1-3fd82607.th",
+                "b72baf4e-8778635e.th",
+                "42e558d4-196e0e1b.th",
+                "305bc58f-18378783.th",
+            ],
         ),
         (
             "mdx_extra_q",
@@ -78,15 +105,20 @@ pub fn list_supported_models(torch_hub_checkpoints_dir: Option<&Path>) -> Vec<Mo
             "Quantized MDX-Extra model.",
             vec!["vocals", "drums", "bass", "other"],
             1.3_f32,
-            "83fc094f-4a16d450.th",
+            &[
+                "83fc094f-4a16d450.th",
+                "464b36d7-e5a9386e.th",
+                "14fc6a69-a89dd0ee.th",
+                "7fd6ef75-a905dd85.th",
+            ],
         ),
     ];
 
     defs.into_iter()
-        .map(|(id, name, desc, stems, compute, weight_file)| {
-            let cached = torch_hub_checkpoints_dir
-                .map(|dir| dir.join(weight_file).is_file())
-                .unwrap_or(false);
+        .map(|(id, name, desc, stems, compute, weight_files)| {
+            let cached = weight_files
+                .iter()
+                .all(|wf| search_dirs.iter().any(|dir| dir.join(wf).is_file()));
             ModelInfo {
                 id: id.to_string(),
                 display_name: name.to_string(),

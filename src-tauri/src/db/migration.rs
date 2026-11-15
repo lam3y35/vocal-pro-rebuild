@@ -22,8 +22,10 @@ pub fn run_legacy_migration(
     extra_config_paths: &[PathBuf],
     output_scan_roots: &[PathBuf],
 ) -> AppResult<MigrationReport> {
-    let mut stmt = conn.prepare("SELECT COUNT(*) FROM schema_version WHERE version >= 1")?;
-    let count: i64 = stmt.query_row([], |row| row.get(0))?;
+    let count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM schema_version WHERE version >= 1", [], |row| {
+            row.get(0)
+        })?;
     if count > 0 {
         return Ok(MigrationReport {
             already_migrated: true,
@@ -53,6 +55,8 @@ pub fn run_legacy_migration(
             report.backup_dir = Some(backup_dir.to_string_lossy().to_string());
         }
     }
+
+    let tx = conn.unchecked_transaction()?;
 
     // 1. Import config.json / ~/.vocalpro_config.json / window_settings.json / flutter_settings.json
     let mut config_candidates = Vec::new();
@@ -241,10 +245,11 @@ pub fn run_legacy_migration(
         }
     }
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO schema_version (version, applied_at) VALUES (1, ?1)",
         params![now],
     )?;
+    tx.commit()?;
 
     Ok(report)
 }

@@ -87,6 +87,30 @@ pub fn write_encoded_audio(
             &target_path.to_string_lossy(),
         ])
         .status()
+    } else if fmt == "ogg" {
+        cmd.args([
+            "-y",
+            "-i",
+            &tmp_wav.to_string_lossy(),
+            "-codec:a",
+            "libvorbis",
+            "-b:a",
+            if bitrate.is_empty() { "192k" } else { bitrate },
+            &target_path.to_string_lossy(),
+        ])
+        .status()
+    } else if fmt == "aac" || fmt == "m4a" {
+        cmd.args([
+            "-y",
+            "-i",
+            &tmp_wav.to_string_lossy(),
+            "-codec:a",
+            "aac",
+            "-b:a",
+            if bitrate.is_empty() { "256k" } else { bitrate },
+            &target_path.to_string_lossy(),
+        ])
+        .status()
     } else {
         let _ = std::fs::remove_file(&tmp_wav);
         return Err(AppError::InvalidInput(format!(
@@ -111,27 +135,63 @@ pub fn export_stem_mix(
     format: &str,
     bitrate: &str,
 ) -> AppResult<PathBuf> {
+    let ext = format.trim_start_matches('.').to_lowercase();
+    let out_path = folder_path.join(format!("stem_mix.{}", ext));
+    export_stem_mix_to_file(folder_path, &out_path, volumes, format, bitrate)
+}
+
+pub fn export_stem_mix_to_file(
+    folder_path: &Path,
+    target_path: &Path,
+    volumes: &HashMap<String, f32>,
+    format: &str,
+    bitrate: &str,
+) -> AppResult<PathBuf> {
+    export_stem_mix_with_pans(folder_path, target_path, volumes, None, format, bitrate)
+}
+
+pub fn export_stem_mix_with_pans(
+    folder_path: &Path,
+    target_path: &Path,
+    volumes: &HashMap<String, f32>,
+    pans: Option<&HashMap<String, f32>>,
+    format: &str,
+    bitrate: &str,
+) -> AppResult<PathBuf> {
     let stems = discover_stems_in_folder(folder_path)?;
     let mixer = LiveStemMixer::load_stems(stems, folder_path.to_path_buf())?;
     mixer.apply_volumes_map(volumes);
+    if let Some(p) = pans {
+        mixer.apply_pans_map(p);
+    }
     let mixed = mixer.render_full_mix(None);
 
     let ext = format.trim_start_matches('.').to_lowercase();
-    let out_path = folder_path.join(format!("stem_mix.{}", ext));
+    let final_path = target_path.with_extension(&ext);
     write_encoded_audio(
         &mixed,
         mixer.sample_rate,
         mixer.channels as u16,
-        &out_path,
+        &final_path,
         &ext,
         bitrate,
     )?;
-    Ok(out_path)
+    Ok(final_path)
 }
 
 pub fn export_separate_custom_stems(
     folder_path: &Path,
     volumes: &HashMap<String, f32>,
+    format: &str,
+    bitrate: &str,
+) -> AppResult<Vec<PathBuf>> {
+    export_separate_custom_stems_with_pans(folder_path, volumes, None, format, bitrate)
+}
+
+pub fn export_separate_custom_stems_with_pans(
+    folder_path: &Path,
+    volumes: &HashMap<String, f32>,
+    pans: Option<&HashMap<String, f32>>,
     format: &str,
     bitrate: &str,
 ) -> AppResult<Vec<PathBuf>> {
@@ -145,8 +205,31 @@ pub fn export_separate_custom_stems(
         if vol <= 0.0 {
             continue;
         }
+        let pan = pans
+            .and_then(|p| p.get(&stem.name).copied())
+            .unwrap_or(0.0)
+            .clamp(-1.0, 1.0);
+        let l_pan = (1.0 - pan).min(1.0);
+        let r_pan = (1.0 + pan).min(1.0);
         let raw_samples = stem.read_all_interleaved()?;
-        let mut scaled: Vec<f32> = raw_samples.into_iter().map(|x| x * vol).collect();
+        let mut scaled = Vec::with_capacity(raw_samples.len());
+        if mixer.channels >= 2 {
+            for (idx, sample) in raw_samples.into_iter().enumerate() {
+                let ch = idx % mixer.channels;
+                let pan_gain = if ch == 0 {
+                    l_pan
+                } else if ch == 1 {
+                    r_pan
+                } else {
+                    1.0
+                };
+                scaled.push(sample * vol * pan_gain);
+            }
+        } else {
+            for sample in raw_samples {
+                scaled.push(sample * vol);
+            }
+        }
         let peak = scaled.iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()));
         if peak > 0.99 {
             let factor = 0.99 / peak;

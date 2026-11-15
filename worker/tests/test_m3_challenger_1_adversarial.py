@@ -389,9 +389,12 @@ def test_adversarial_installer_iss_fail_fast_bundling() -> None:
             f"Core engine entry must NOT contain skipifsourcedoesntexist: {line}"
         )
 
-    # Model entries must NOT have skipifsourcedoesntexist
+    # Model entries must NOT have skipifsourcedoesntexist and must use a single deduplicated checkpoints destination
     model_lines = [line for line in files_section.splitlines() if "dist\\bundle\\models" in line]
-    assert len(model_lines) >= 3, "Models must have at least 3 destination entries (localappdata, checkpoints, app)"
+    assert len(model_lines) == 1, "Models must have exactly 1 deduplicated destination entry ({localappdata}\\VocalPro\\models\\checkpoints)"
+    assert "{localappdata}\\VocalPro\\models\\checkpoints" in model_lines[0], (
+        f"Model entry must stage to {{localappdata}}\\VocalPro\\models\\checkpoints: {model_lines[0]}"
+    )
     for line in model_lines:
         assert "skipifsourcedoesntexist" not in line.lower(), (
             f"Model entry must NOT contain skipifsourcedoesntexist: {line}"

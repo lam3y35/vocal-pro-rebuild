@@ -5,6 +5,7 @@ import { StemTrackInfo } from "../bindings";
 interface StemMixerStripProps {
   stem: StemTrackInfo;
   onGainChange: (gain: number) => void;
+  onPanChange?: (pan: number) => void;
   onToggleMute: () => void;
   onToggleSolo: () => void;
   onExportMidi: () => void;
@@ -24,10 +25,18 @@ const STEM_COLORS: Record<string, { bg: string; border: string; glow: string }> 
 export const StemMixerStrip: React.FC<StemMixerStripProps> = ({
   stem,
   onGainChange,
+  onPanChange,
   onToggleMute,
   onToggleSolo,
   onExportMidi,
 }) => {
+  const panVal = stem.pan ?? 0;
+  const panLabel =
+    Math.abs(panVal) < 0.03
+      ? "C"
+      : panVal < 0
+      ? `L${Math.round(Math.abs(panVal) * 100)}`
+      : `R${Math.round(panVal * 100)}`;
   const color = STEM_COLORS[stem.name.toLowerCase()] || {
     bg: "#6C63FF",
     border: "#6C63FF",
@@ -113,6 +122,33 @@ export const StemMixerStrip: React.FC<StemMixerStripProps> = ({
           className="w-full accent-[#6C63FF] cursor-pointer"
         />
       </div>
+
+      {onPanChange && (
+        <div className="flex items-center gap-2 pt-0.5 text-[10px] font-mono text-slate-400">
+          <span className="w-4 text-center font-bold">L</span>
+          <input
+            type="range"
+            min={-1}
+            max={1}
+            step={0.05}
+            value={panVal}
+            title="Stereo Pan (double-click to reset center)"
+            aria-label={`${stem.name} stereo pan`}
+            onChange={(e) => onPanChange(parseFloat(e.target.value))}
+            onDoubleClick={() => onPanChange(0)}
+            className="flex-1 accent-[#00F0B5] cursor-pointer h-1.5"
+          />
+          <span className="w-4 text-center font-bold">R</span>
+          <button
+            type="button"
+            onClick={() => onPanChange(0)}
+            title="Reset Pan to Center"
+            className="w-9 text-center px-1 py-0.5 rounded bg-[#171A26] border border-[#252B3D] text-slate-300 hover:border-[#00F0B5] font-bold"
+          >
+            {panLabel}
+          </button>
+        </div>
+      )}
     </div>
   );
 };

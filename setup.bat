@@ -55,7 +55,12 @@ if %ERRORLEVEL% equ 0 (
 
 echo [4/4] Pre-caching default Demucs AI model weights...
 set "PYTHONPATH=%~dp0worker"
-"%VENV_PY%" -c "import demucs.pretrained; demucs.pretrained.get_model('htdemucs'); print('[SUCCESS] Demucs weights verified!')" 2>nul
+"%VENV_PY%" -c "import demucs.pretrained; demucs.pretrained.get_model('htdemucs')" 2>nul
+if !ERRORLEVEL! neq 0 (
+    echo [WARN] Could not verify Demucs weights offline. Check your internet connection or run model setup later.
+) else (
+    echo [SUCCESS] Demucs weights verified!
+)
 
 echo.
 echo ==============================================================================

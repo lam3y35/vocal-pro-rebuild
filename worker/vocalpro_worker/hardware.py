@@ -22,6 +22,13 @@ import numpy as np
 import torch
 
 
+def _subprocess_window_kwargs() -> dict[str, Any]:
+    """Suppress flashing PowerShell console windows on Windows."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 @dataclass
 class HardwareCalibrationResult:
     """Empirical calibration benchmark result (<= 30s) keyed by hardware_fingerprint."""
@@ -165,6 +172,7 @@ def _detect_memory_mb() -> tuple[int, int]:
                 capture_output=True,
                 text=True,
                 timeout=3,
+                **_subprocess_window_kwargs(),
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 data = json.loads(proc.stdout.strip())
@@ -212,6 +220,7 @@ def _detect_battery_state() -> tuple[str, bool, Optional[int]]:
                 capture_output=True,
                 text=True,
                 timeout=2,
+                **_subprocess_window_kwargs(),
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 data = json.loads(proc.stdout.strip())
@@ -298,6 +307,7 @@ def _detect_gpu_details() -> tuple[str, Optional[str], Optional[int], Optional[s
                 capture_output=True,
                 text=True,
                 timeout=3,
+                **_subprocess_window_kwargs(),
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 data = json.loads(proc.stdout.strip())

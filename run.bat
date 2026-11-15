@@ -41,7 +41,7 @@ if "%~1"=="--dev" goto RUN_DEV
 :: 2. Launch pre-compiled desktop release executable if present (instant startup)
 if exist "%~dp0release\vocalpro.exe" (
     echo [INFO] Starting VocalPro Desktop Application...
-    start "" "%~dp0release\vocalpro.exe"
+    start "" "%~dp0release\vocalpro.exe" %*
     exit /b 0
 )
 
@@ -50,7 +50,7 @@ if exist "%~dp0release\vocalpro.exe" (
 where cargo >nul 2>&1
 if %ERRORLEVEL% equ 0 (
     echo [INFO] Launching native Tauri v2 desktop application via Cargo...
-    call npm run tauri dev
+    call npm run tauri:dev
     exit /b 0
 )
 

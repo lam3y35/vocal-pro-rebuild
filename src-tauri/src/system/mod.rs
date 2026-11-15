@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{Read, Write};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -46,6 +47,7 @@ pub struct HardwareProfile {
     pub total_ram_mb: u64,
     pub available_ram_mb: u64,
     pub disk_free_gb: f64,
+    #[serde(alias = "temp_drive_speed_mb_s")]
     pub temp_drive_speed_mbps: f64,
     pub power_source: String,
     pub on_battery: bool,
@@ -289,8 +291,10 @@ pub fn classify_hardware_spec(spec: HardwareSpecInput) -> HardwareProfile {
                     .to_string(),
             );
             "eco"
-        } else {
+        } else if matches!(device_tier, "ultra_gpu" | "high_gpu") {
             "max_quality"
+        } else {
+            "balanced"
         }
     } else {
         req_mode
@@ -464,6 +468,28 @@ fn measure_temp_write_speed_mbps(app_data_dir: &Path) -> f64 {
 }
 
 fn detect_disk_free_gb(dir: &Path) -> f64 {
+    let check_path = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if let Ok(disks) = sysinfo::Disks::new_with_refreshed_list() {
+        let mut best_match: Option<(usize, u64)> = None;
+        for disk in &disks {
+            let mp = disk.mount_point();
+            let mp_norm = mp.to_string_lossy().to_lowercase();
+            let dir_norm = check_path.to_string_lossy().to_lowercase();
+            let trimmed_dir = dir_norm.trim_start_matches("\\\\?\\");
+            if trimmed_dir.starts_with(mp_norm.as_str()) {
+                let len = mp_norm.len();
+                if best_match.map(|(b_len, _)| len > b_len).unwrap_or(true) {
+                    best_match = Some((len, disk.available_space()));
+                }
+            }
+        }
+        if let Some((_, avail_bytes)) = best_match {
+            if avail_bytes > 0 {
+                let gb = avail_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                return (gb * 100.0).round() / 100.0;
+            }
+        }
+    }
     if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
         if let Ok(out) = Command::new("df")
             .args(["-k", &dir.to_string_lossy()])
@@ -524,7 +550,8 @@ pub fn detect_system_hardware_with_mode(
     let probe = probe_ram_and_cores();
     let physical_cores = probe.physical_cores;
     let logical_cores = probe.logical_cores;
-    let mut cpu_model = format!("{} Processor", std::env::consts::ARCH.to_uppercase());
+    let generic_cpu = format!("{} Processor", std::env::consts::ARCH.to_uppercase());
+    let mut cpu_model = generic_cpu.clone();
     let mut simd_features = Vec::new();
 
     if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
@@ -549,6 +576,16 @@ pub fn detect_system_hardware_with_mode(
                             simd_features.push(label.to_string());
                         }
                     }
+                }
+            }
+        }
+    }
+    if cpu_model == generic_cpu {
+        if let Ok(sys_info) = sysinfo::System::new_all() {
+            if let Some(cpu) = sys_info.cpus().first() {
+                let brand = cpu.brand().trim();
+                if !brand.is_empty() {
+                    cpu_model = brand.to_string();
                 }
             }
         }
@@ -592,7 +629,10 @@ pub fn detect_system_hardware_with_mode(
 
     let os_version = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "10.0".to_string());
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| sysinfo::System::long_os_version().ok())
+        .unwrap_or_else(|| "10.0".to_string());
 
     classify_hardware_spec(HardwareSpecInput {
         os_name: std::env::consts::OS.to_string(),
@@ -668,10 +708,13 @@ pub fn register_file_associations(app_data_dir: &Path, exe_path: Option<&Path>) 
             let _ = cmd3
                 .args([
                     "add",
-                    &format!("HKCU\\Software\\Classes\\{}", ext),
-                    "/ve",
-                    "/d",
+                    &format!("HKCU\\Software\\Classes\\{}\\OpenWithProgids", ext),
+                    "/v",
                     prog_id,
+                    "/t",
+                    "REG_NONE",
+                    "/d",
+                    "",
                     "/f",
                 ])
                 .status();
@@ -695,22 +738,25 @@ pub fn create_desktop_shortcut(app_data_dir: &Path, exe_path: Option<&Path>) -> 
 
     let shortcut_path = if cfg!(target_os = "windows") {
         let lnk = desktop_dir.join("VocalPro.lnk");
-        let ps_script = format!(
-            "$s=(New-Object -COM WScript.Shell).CreateShortcut('{}');$s.TargetPath='{}';$s.Save()",
-            lnk.to_string_lossy(),
-            exe.to_string_lossy()
-        );
+        let ps_script = "$s=(New-Object -COM WScript.Shell).CreateShortcut($env:VOCALPRO_LNK);$s.TargetPath=$env:VOCALPRO_EXE;$s.Save()";
         let mut ps_cmd = Command::new("powershell");
         silent_command(&mut ps_cmd);
         let _ = ps_cmd
-            .args(["-NoProfile", "-Command", &ps_script])
+            .env("VOCALPRO_LNK", lnk.to_string_lossy().as_ref())
+            .env("VOCALPRO_EXE", exe.to_string_lossy().as_ref())
+            .args(["-NoProfile", "-Command", ps_script])
             .status();
         lnk
     } else {
         let desktop_file = desktop_dir.join("VocalPro.desktop");
+        let escaped_exe = exe
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%");
         let content = format!(
             "[Desktop Entry]\nType=Application\nName=VocalPro\nExec=\"{}\" %F\nIcon=vocalpro\nTerminal=false\nCategories=AudioVideo;Audio;\n",
-            exe.to_string_lossy()
+            escaped_exe
         );
         std::fs::write(&desktop_file, content)?;
         desktop_file
@@ -745,19 +791,35 @@ pub fn percent_decode_url(input: &str) -> String {
 }
 
 pub fn sanitize_filename(name: &str) -> String {
-    let clean: String = name
+    let mut clean: String = name
         .chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
             _ => c,
         })
         .collect();
-    let trimmed = clean.trim().to_string();
-    if trimmed.is_empty() {
-        "downloaded_media.mp3".to_string()
-    } else {
-        trimmed
+    while clean.contains("..") {
+        clean = clean.replace("..", "_");
     }
+    let mut trimmed = clean.trim_matches(|c: char| c.is_whitespace() || c == '.').to_string();
+    if trimmed.is_empty() {
+        return "downloaded_media.mp3".to_string();
+    }
+    let stem_upper = Path::new(&trimmed)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&trimmed)
+        .to_uppercase();
+    if matches!(
+        stem_upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    ) {
+        trimmed = format!("_{}", trimmed);
+    }
+    trimmed
 }
 
 pub fn extract_query_filename(url: &str) -> Option<String> {
@@ -852,13 +914,352 @@ pub fn extract_path_filename(url: &str) -> Option<String> {
     None
 }
 
+const ALLOWED_DOWNLOAD_MEDIA_EXTS: &[&str] = &[
+    "mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif",
+    "mp4", "mkv", "webm", "avi", "mov", "m4v",
+];
+
+fn is_disallowed_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0b1100_0000) == 64)
+                || (o[0] == 198 && (o[1] & 0xfe) == 18)
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 2)
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+        }
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            if seg[0] == 0
+                && seg[1] == 0
+                && seg[2] == 0
+                && seg[3] == 0
+                && seg[4] == 0
+                && (seg[5] == 0 || seg[5] == 0xffff)
+                && !v6.is_loopback()
+                && !v6.is_unspecified()
+            {
+                let v4 = std::net::Ipv4Addr::new(
+                    (seg[6] >> 8) as u8,
+                    (seg[6] & 0xff) as u8,
+                    (seg[7] >> 8) as u8,
+                    (seg[7] & 0xff) as u8,
+                );
+                return is_disallowed_ip(IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00
+                || (seg[0] & 0xffc0) == 0xfe80
+                || (seg[0] & 0xffc0) == 0xfec0
+                || (seg[0] == 0x0064 && seg[1] == 0xff9b)
+                || seg[0] == 0x2002
+                || (seg[0] == 0x2001 && seg[1] == 0x0000)
+        }
+    }
+}
+
+fn format_curl_resolve_pin(host: &str, port: u16, ip: IpAddr) -> String {
+    let formatted_host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]", host)
+    } else {
+        host.to_string()
+    };
+    match ip {
+        IpAddr::V4(v4) => format!("{}:{}:{}", formatted_host, port, v4),
+        IpAddr::V6(v6) => format!("{}:{}:[{}]", formatted_host, port, v6),
+    }
+}
+
+fn validate_external_media_url(url: &str) -> AppResult<Vec<String>> {
+    let trimmed = url.trim();
+    let lower_url = trimmed.to_ascii_lowercase();
+    let default_port = if lower_url.starts_with("https://") {
+        443_u16
+    } else if lower_url.starts_with("http://") {
+        80_u16
+    } else {
+        return Err(AppError::InvalidInput(
+            "URL must start with http:// or https://".to_string(),
+        ));
+    };
+    let allow_local_urls = std::env::var("VOCALPRO_ALLOW_LOCAL_URLS").as_deref() == Ok("1");
+    let after_scheme = trimmed.split_once("://").map(|x| x.1).unwrap_or("");
+    let authority = after_scheme.split(&['/', '?', '#'][..]).next().unwrap_or("");
+    if authority.contains('@') {
+        return Err(AppError::InvalidInput(
+            "Embedded credentials in media URL are not allowed".to_string(),
+        ));
+    }
+
+    let (raw_host, port) = if authority.starts_with('[') {
+        let Some(end_bracket) = authority.find(']') else {
+            return Err(AppError::InvalidInput("Malformed IPv6 URL host".to_string()));
+        };
+        let host_slice = &authority[1..end_bracket];
+        let rest = &authority[end_bracket + 1..];
+        let parsed_port = if rest.is_empty() {
+            default_port
+        } else if let Some(port_str) = rest.strip_prefix(':') {
+            port_str
+                .parse::<u16>()
+                .ok()
+                .filter(|p| *p > 0)
+                .ok_or_else(|| AppError::InvalidInput("Invalid URL port".to_string()))?
+        } else {
+            return Err(AppError::InvalidInput("Malformed URL authority".to_string()));
+        };
+        (host_slice, parsed_port)
+    } else if let Some((h, port_str)) = authority.rsplit_once(':') {
+        let parsed_port = port_str
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)
+            .ok_or_else(|| AppError::InvalidInput("Invalid URL port".to_string()))?;
+        (h, parsed_port)
+    } else {
+        (authority, default_port)
+    };
+
+    let host = raw_host.trim_end_matches('.').to_lowercase();
+    if allow_local_urls && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+        let pin_ip = if host == "::1" {
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        } else {
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        };
+        return Ok(vec![format_curl_resolve_pin(&host, port, pin_ip)]);
+    }
+    if host.is_empty()
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".localdomain")
+        || host == "0"
+        || host.starts_with("0x")
+        || host.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(AppError::InvalidInput(
+            "Access to local or metadata network addresses is blocked".to_string(),
+        ));
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_disallowed_ip(ip) {
+            return Err(AppError::InvalidInput(
+                "Access to local, private, or metadata IP addresses is blocked".to_string(),
+            ));
+        }
+        return Ok(vec![format_curl_resolve_pin(&host, port, ip)]);
+    }
+
+    // Reject non-canonical numeric/octal/hex IPv4-like forms (e.g. 0177.0.0.1 or 0x7f.0.0.1)
+    let dotted_parts: Vec<&str> = host.split('.').collect();
+    if (2..=4).contains(&dotted_parts.len())
+        && dotted_parts.iter().all(|seg| {
+            !seg.is_empty()
+                && (seg.chars().all(|c| c.is_ascii_digit())
+                    || seg
+                        .strip_prefix("0x")
+                        .map(|hex| !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()))
+                        .unwrap_or(false))
+        })
+    {
+        return Err(AppError::InvalidInput(
+            "Non-canonical numeric IP URLs are blocked".to_string(),
+        ));
+    }
+
+    let addrs: Vec<std::net::SocketAddr> = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|_| AppError::InvalidInput("Could not resolve media URL hostname".to_string()))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Could not resolve media URL hostname".to_string(),
+        ));
+    }
+    for addr in &addrs {
+        if is_disallowed_ip(addr.ip()) {
+            return Err(AppError::InvalidInput(
+                "Access to local, private, or metadata network addresses is blocked".to_string(),
+            ));
+        }
+    }
+    let mut seen_ips = std::collections::HashSet::new();
+    let pins = addrs
+        .iter()
+        .filter_map(|addr| {
+            let ip = addr.ip();
+            if seen_ips.insert(ip) {
+                Some(format_curl_resolve_pin(&host, port, ip))
+            } else {
+                None
+            }
+        })
+        .collect();
+    Ok(pins)
+}
+
+fn resolve_relative_redirect(base_url: &str, location: &str) -> AppResult<String> {
+    let loc = location.trim();
+    let lower_loc = loc.to_ascii_lowercase();
+    if lower_loc.starts_with("http://") || lower_loc.starts_with("https://") {
+        return Ok(loc.to_string());
+    }
+    let (scheme, rest) = base_url
+        .split_once("://")
+        .ok_or_else(|| AppError::InvalidInput("Invalid base URL".to_string()))?;
+    if loc.starts_with("//") {
+        return Ok(format!("{}:{}", scheme, loc));
+    }
+    let authority = rest.split(&['/', '?', '#'][..]).next().unwrap_or("");
+    if loc.starts_with('/') {
+        return Ok(format!("{}://{}{}", scheme, authority, loc));
+    }
+    let base_no_query = base_url.split(&['?', '#'][..]).next().unwrap_or(base_url);
+    let path_end = base_no_query.rfind('/').unwrap_or(base_no_query.len());
+    let prefix = if path_end > scheme.len() + 3 {
+        &base_no_query[..=path_end]
+    } else {
+        base_no_query
+    };
+    Ok(format!("{}/{}", prefix.trim_end_matches('/'), loc))
+}
+
+fn resolve_safe_media_target(initial_url: &str, max_hops: usize) -> AppResult<(String, Vec<String>)> {
+    let mut current = initial_url.to_string();
+    for hop in 0..=max_hops {
+        let pins = validate_external_media_url(&current)?;
+        let mut head_cmd = Command::new("curl");
+        silent_command(&mut head_cmd);
+        head_cmd.args(["-s", "-I", "--proto", "=http,https", "--max-redirs", "0", "--max-time", "6"]);
+        for pin in &pins {
+            head_cmd.args(["--resolve", pin]);
+        }
+        head_cmd.arg(&current);
+        let Ok(out) = head_cmd.output() else {
+            return Ok((current, pins));
+        };
+        if !out.status.success() {
+            return Ok((current, pins));
+        }
+        let header_text = String::from_utf8_lossy(&out.stdout);
+        let mut status_code: u16 = 0;
+        let mut location: Option<String> = None;
+        for line in header_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("HTTP/") {
+                if let Some(code_str) = trimmed.split_whitespace().nth(1) {
+                    status_code = code_str.parse::<u16>().unwrap_or(0);
+                }
+            } else if trimmed.to_ascii_lowercase().starts_with("location:") {
+                if let Some((_, val)) = trimmed.split_once(':') {
+                    let loc = val.trim();
+                    if !loc.is_empty() {
+                        location = Some(loc.to_string());
+                    }
+                }
+            }
+        }
+        if matches!(status_code, 301 | 302 | 303 | 307 | 308) {
+            let Some(loc) = location else {
+                return Ok((current, pins));
+            };
+            if hop == max_hops {
+                return Err(AppError::InvalidInput(
+                    "Too many redirects when fetching media URL".to_string(),
+                ));
+            }
+            current = resolve_relative_redirect(&current, &loc)?;
+            continue;
+        }
+        return Ok((current, pins));
+    }
+    Err(AppError::InvalidInput(
+        "Too many redirects when fetching media URL".to_string(),
+    ))
+}
+
+fn extract_content_disposition_filename(headers: &str) -> Option<String> {
+    for line in headers.lines() {
+        let lower = line.to_ascii_lowercase();
+        if !lower.starts_with("content-disposition:") {
+            continue;
+        }
+        if let Some((_, val)) = line.split_once(':') {
+            for part in val.split(';') {
+                let p = part.trim();
+                let p_low = p.to_ascii_lowercase();
+                if p_low.starts_with("filename*=") {
+                    let raw = p[10..].trim().trim_matches('"');
+                    let stripped = raw
+                        .split_once("''")
+                        .map(|x| x.1)
+                        .unwrap_or(raw);
+                    let decoded = percent_decode_url(stripped);
+                    if !decoded.trim().is_empty() {
+                        return Some(decoded);
+                    }
+                } else if p_low.starts_with("filename=") {
+                    let raw = p[9..].trim().trim_matches('"');
+                    let decoded = percent_decode_url(raw);
+                    if !decoded.trim().is_empty() {
+                        return Some(decoded);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn enforce_allowed_media_extension(candidate: &str, default_ext: &str) -> String {
+    let clean = sanitize_filename(candidate);
+    if let Some((stem, ext)) = clean.rsplit_once('.') {
+        let ext_low = ext.to_ascii_lowercase();
+        if ALLOWED_DOWNLOAD_MEDIA_EXTS.contains(&ext_low.as_str()) {
+            let clean_stem = sanitize_filename(stem);
+            return format!("{}.{}", clean_stem, ext_low);
+        }
+        let clean_stem = sanitize_filename(stem);
+        return format!("{}.{}", clean_stem, default_ext);
+    }
+    format!("{}.{}", clean, default_ext)
+}
+
 pub fn fetch_webpage_title(url: &str) -> Option<String> {
+    let Ok(pins) = validate_external_media_url(url) else {
+        return None;
+    };
     let mut title_cmd = Command::new("curl");
     silent_command(&mut title_cmd);
-    let output = title_cmd
-        .args(["-L", "-s", "--max-time", "4", "-r", "0-16384", url])
-        .output()
-        .ok()?;
+    title_cmd.args([
+        "-s",
+        "--proto",
+        "=http,https",
+        "--max-redirs",
+        "0",
+        "--max-time",
+        "4",
+        "-r",
+        "0-16384",
+    ]);
+    for pin in &pins {
+        title_cmd.args(["--resolve", pin]);
+    }
+    let output = title_cmd.arg(url).output().ok()?;
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout);
         if let Some(start_tag) = text.to_lowercase().find("<title") {
@@ -893,7 +1294,38 @@ pub fn fetch_webpage_title(url: &str) -> Option<String> {
     None
 }
 
+static CUSTOM_FFMPEG_PATH: std::sync::OnceLock<std::sync::Mutex<String>> =
+    std::sync::OnceLock::new();
+
+pub fn set_custom_ffmpeg_path(path: &str) {
+    let lock = CUSTOM_FFMPEG_PATH.get_or_init(|| std::sync::Mutex::new(String::new()));
+    if let Ok(mut guard) = lock.lock() {
+        *guard = path.trim().to_string();
+    }
+}
+
 pub fn resolve_ffmpeg_path() -> PathBuf {
+    if let Some(lock) = CUSTOM_FFMPEG_PATH.get() {
+        if let Ok(guard) = lock.lock() {
+            let trimmed = guard.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("auto") {
+                let p = PathBuf::from(trimmed);
+                let fname = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                let ext = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_ascii_lowercase());
+                if p.is_file() && fname.contains("ffmpeg") && matches!(ext.as_deref(), None | Some("exe")) {
+                    return p;
+                }
+            }
+        }
+    }
+
     if let Ok(custom) = std::env::var("VOCALPRO_FFMPEG") {
         let p = PathBuf::from(custom);
         if p.is_file() {
@@ -931,6 +1363,13 @@ pub fn resolve_ffmpeg_path() -> PathBuf {
             }
         }
         if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+            let p0 = PathBuf::from(&localappdata)
+                .join("VocalPro")
+                .join("engine")
+                .join("ffmpeg.exe");
+            if p0.is_file() {
+                return p0;
+            }
             let p1 = PathBuf::from(&localappdata)
                 .join("Programs")
                 .join("ffmpeg")
@@ -993,213 +1432,168 @@ pub fn download_media_url(
     downloads_dir: &Path,
     custom_name: Option<&str>,
 ) -> AppResult<(String, PathBuf, String)> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(AppError::InvalidInput(
-            "URL must start with http:// or https://".to_string(),
-        ));
-    }
+    let (final_url, pin_args) = resolve_safe_media_target(url, 4)?;
     std::fs::create_dir_all(downloads_dir)?;
 
-    // 1. Run curl with -O -J to automatically extract the remote filename from Content-Disposition
-    let mut curl_cmd1 = Command::new("curl");
-    silent_command(&mut curl_cmd1);
-    let curl_output = curl_cmd1
-        .current_dir(downloads_dir)
-        .args([
-            "-L",
-            "-s",
-            "-f",
-            "-O",
-            "-J",
-            "-w",
-            "%{filename_effective}\n%{url_effective}\n%{content_type}\n",
-            url,
-        ])
-        .output();
+    let uid = uuid::Uuid::new_v4().to_string();
+    let temp_path = downloads_dir.join(format!("vp_{}.part", uid));
+    let headers_path = downloads_dir.join(format!("vp_{}.hdr", uid));
 
-    let mut detected_filename = String::new();
-    let mut redirected_url = String::new();
-    let mut content_type = String::new();
+    let mut curl_cmd = Command::new("curl");
+    silent_command(&mut curl_cmd);
+    curl_cmd.args([
+        "-s",
+        "-f",
+        "--proto",
+        "=http,https",
+        "--max-redirs",
+        "0",
+        "--max-filesize",
+        "524288000",
+        "--max-time",
+        "120",
+        "-D",
+        &headers_path.to_string_lossy(),
+        "-o",
+        &temp_path.to_string_lossy(),
+        "-w",
+        "%{content_type}\n",
+    ]);
+    for pin in &pin_args {
+        curl_cmd.args(["--resolve", pin]);
+    }
+    let curl_output = curl_cmd.arg(&final_url).output();
 
-    let curl_success = if let Ok(ref out) = curl_output {
-        if out.status.success() {
-            let stdout_str = String::from_utf8_lossy(&out.stdout);
-            let mut lines = stdout_str.lines();
-            if let Some(l) = lines.next() {
-                detected_filename = l.trim().to_string();
-            }
-            if let Some(l) = lines.next() {
-                redirected_url = l.trim().to_string();
-            }
-            if let Some(l) = lines.next() {
-                content_type = l.trim().to_string();
-            }
-            true
-        } else {
-            false
+    let headers_text = std::fs::read_to_string(&headers_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&headers_path);
+
+    let out = match curl_output {
+        Ok(o) if o.status.success() && temp_path.is_file() => o,
+        Ok(o) => {
+            let _ = std::fs::remove_file(&temp_path);
+            let err_txt = String::from_utf8_lossy(&o.stderr);
+            return Err(AppError::System(format!(
+                "Failed to download media from URL ({}): {}",
+                url,
+                err_txt.trim()
+            )));
         }
-    } else {
-        false
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(AppError::System(format!("Failed to invoke curl: {}", e)));
+        }
     };
 
-    // If server responded with an explicit HTML document, fail immediately
+    let content_type = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let ct_lower = content_type.to_lowercase();
-    if ct_lower.contains("text/html") || ct_lower.contains("application/xhtml+xml") {
-        if !detected_filename.is_empty() {
-            let _ = std::fs::remove_file(downloads_dir.join(&detected_filename));
-        }
+    let dangerous_mime = ct_lower.contains("application/x-msdownload")
+        || ct_lower.contains("application/x-dosexec")
+        || ct_lower.contains("application/x-executable")
+        || ct_lower.contains("application/javascript")
+        || ct_lower.contains("text/javascript")
+        || ct_lower.contains("image/svg+xml");
+
+    if dangerous_mime || is_html_or_text_payload(&temp_path, &content_type) {
+        let _ = std::fs::remove_file(&temp_path);
         return Err(AppError::InvalidInput(
-            "The URL returned an HTML webpage instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
+            "The URL returned an HTML webpage or non-media payload instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
         ));
     }
 
-    let default_ext = if content_type.contains("video/mp4") {
+    let default_ext = if ct_lower.contains("video/mp4") {
         "mp4"
-    } else if content_type.contains("video/") || content_type.contains("matroska") {
+    } else if ct_lower.contains("video/webm") || ct_lower.contains("audio/webm") {
+        "webm"
+    } else if ct_lower.contains("video/") || ct_lower.contains("matroska") {
         "mkv"
-    } else if content_type.contains("audio/wav") {
+    } else if ct_lower.contains("audio/wav") || ct_lower.contains("audio/x-wav") {
         "wav"
-    } else if content_type.contains("audio/flac") {
+    } else if ct_lower.contains("audio/flac") {
         "flac"
-    } else if content_type.contains("audio/aac") || content_type.contains("audio/mp4") {
+    } else if ct_lower.contains("audio/ogg") {
+        "ogg"
+    } else if ct_lower.contains("audio/aac") || ct_lower.contains("audio/mp4") {
         "m4a"
     } else {
         "mp3"
     };
 
-    // If curl failed with -O -J (e.g. server refused remote header name), fallback to direct write
-    if !curl_success
-        || detected_filename.is_empty()
-        || !downloads_dir.join(&detected_filename).is_file()
-    {
-        let fallback_name = custom_name
-            .map(|s| s.to_string())
-            .or_else(|| extract_query_filename(url))
-            .or_else(|| extract_path_filename(url))
-            .or_else(|| fetch_webpage_title(url))
-            .unwrap_or_else(|| "downloaded_media.mp3".to_string());
+    let header_filename = extract_content_disposition_filename(&headers_text);
+    let is_generic = header_filename
+        .as_deref()
+        .map(|f| {
+            let stem = Path::new(f)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            matches!(
+                stem.as_str(),
+                "stream"
+                    | "download"
+                    | "audio"
+                    | "video"
+                    | "get"
+                    | "watch"
+                    | "media"
+                    | "play"
+                    | "file"
+                    | "downloaded_media"
+                    | ""
+            ) || stem.chars().all(|c| c.is_ascii_digit())
+        })
+        .unwrap_or(true);
 
-        let mut sanitized = sanitize_filename(&fallback_name);
-        if !sanitized.contains('.') {
-            sanitized = format!("{}.{}", sanitized, default_ext);
-        }
-        let fallback_path = downloads_dir.join(&sanitized);
+    let chosen_name = custom_name
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| if !is_generic { header_filename.clone() } else { None })
+        .or_else(|| extract_query_filename(url))
+        .or_else(|| extract_query_filename(&final_url))
+        .or_else(|| extract_path_filename(&final_url))
+        .or_else(|| extract_path_filename(url))
+        .or(header_filename)
+        .unwrap_or_else(|| "downloaded_media".to_string());
 
-        let mut curl_cmd2 = Command::new("curl");
-        silent_command(&mut curl_cmd2);
-        let status = curl_cmd2
-            .args([
-                "-L",
-                "-s",
-                "-f",
-                "-o",
-                &fallback_path.to_string_lossy(),
-                url,
-            ])
-            .status()
-            .map_err(|e| AppError::System(format!("Failed to invoke curl: {}", e)))?;
-
-        if !status.success() || !fallback_path.is_file() {
-            return Err(AppError::System(format!(
-                "Failed to download media from URL: {}",
-                url
-            )));
-        }
-
-        if is_html_or_text_payload(&fallback_path, &content_type) {
-            let _ = std::fs::remove_file(&fallback_path);
-            return Err(AppError::InvalidInput(
-                "The URL returned an HTML webpage instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
-            ));
-        }
-
-        let ext = fallback_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("mp3")
-            .to_uppercase();
-
-        return Ok((sanitized, fallback_path, ext));
-    }
-
-    // Curl succeeded with -O -J: check if detected filename is generic and can be improved
-    let downloaded_path = downloads_dir.join(&detected_filename);
-    if is_html_or_text_payload(&downloaded_path, &content_type) {
-        let _ = std::fs::remove_file(&downloaded_path);
-        return Err(AppError::InvalidInput(
-            "The URL returned an HTML webpage instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
-        ));
-    }
-
-    let is_generic = {
-        let stem = downloaded_path
+    let final_filename = enforce_allowed_media_extension(&chosen_name, default_ext);
+    let mut final_path = downloads_dir.join(&final_filename);
+    if final_path.exists() {
+        let stem = Path::new(&final_filename)
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        matches!(
-            stem.as_str(),
-            "stream"
-                | "download"
-                | "audio"
-                | "video"
-                | "get"
-                | "watch"
-                | "media"
-                | "play"
-                | "file"
-                | "downloaded_media"
-                | ""
-        ) || stem.chars().all(|c| c.is_ascii_digit())
-    };
-
-    let better_name = if let Some(cn) = custom_name.filter(|s| !s.trim().is_empty()) {
-        Some(cn.to_string())
-    } else if is_generic {
-        extract_query_filename(url)
-            .or_else(|| extract_query_filename(&redirected_url))
-            .or_else(|| extract_path_filename(&redirected_url))
-            .or_else(|| extract_path_filename(url))
-            .or_else(|| fetch_webpage_title(&redirected_url))
-            .or_else(|| fetch_webpage_title(url))
-    } else {
-        None
-    };
-
-    let (final_filename, final_path) = if let Some(ref target_base) = better_name {
-        let mut clean = sanitize_filename(target_base);
-        let curr_ext = downloaded_path
+            .unwrap_or("downloaded_media");
+        let ext = Path::new(&final_filename)
             .extension()
-            .and_then(|e| e.to_str())
+            .and_then(|s| s.to_str())
             .unwrap_or(default_ext);
-        if !clean.contains('.') {
-            clean = format!("{}.{}", clean, curr_ext);
+        for idx in 1..10_000 {
+            let candidate = downloads_dir.join(format!("{}_{}.{}", stem, idx, ext));
+            if !candidate.exists() {
+                final_path = candidate;
+                break;
+            }
         }
-        let new_path = downloads_dir.join(&clean);
-        if new_path != downloaded_path {
-            let _ = std::fs::rename(&downloaded_path, &new_path);
-            (clean, new_path)
-        } else {
-            (detected_filename, downloaded_path)
-        }
-    } else {
-        (detected_filename, downloaded_path)
-    };
-
-    if is_html_or_text_payload(&final_path, &content_type) {
-        let _ = std::fs::remove_file(&final_path);
-        return Err(AppError::InvalidInput(
-            "The URL returned an HTML webpage instead of a direct media stream. Direct audio/video URLs (e.g. .mp3, .wav, .flac, .mp4, .m4a) are required.".to_string(),
-        ));
+    }
+    let resolved_filename = final_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&final_filename)
+        .to_string();
+    if let Err(e) = std::fs::rename(&temp_path, &final_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(AppError::System(format!(
+            "Failed to move downloaded media into place: {}",
+            e
+        )));
     }
 
     let ext = final_path
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("mp3")
+        .unwrap_or(default_ext)
         .to_uppercase();
 
-    Ok((final_filename, final_path, ext))
+    Ok((resolved_filename, final_path, ext))
 }
 
 pub fn export_diagnostic_bundle(
@@ -1240,7 +1634,7 @@ pub fn get_changelog_releases() -> Vec<ChangelogRelease> {
                 "Native Rust + Tauri v2 + React 19 architecture with zero localhost HTTP/WebSocket ports".to_string(),
                 "Resource-aware multi-process worker scheduler with hardware calibration & battery-aware Eco profile".to_string(),
                 "Real per-segment Demucs progress and <500ms cooperative job cancellation".to_string(),
-                "Disk-streaming lock-free Rust multi-stem mixer (<35 MiB RAM for 6 stems x 5 min, <15ms latency)".to_string(),
+                "Disk-streaming lock-free Rust multi-stem mixer (<35 MiB RAM for 6 stems x 5 min, 15 ms smoothed gain & pan)".to_string(),
                 "All 6 stems saved for htdemucs_6s and output_all_stems (fixes P-07)".to_string(),
                 "SQLite WAL database with automatic v1/v2 config, history, and persistent job queue migration".to_string(),
             ],

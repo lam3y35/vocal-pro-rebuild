@@ -13,6 +13,7 @@ import {
   Zap,
 } from "lucide-react";
 import { ScreenId } from "../components/Sidebar";
+import { TRANSLATIONS } from "../i18n/translations";
 import { invokeCommand } from "../ipc";
 import { useJobsStore, useLibraryStore, useSystemStore } from "../state/appStores";
 
@@ -21,6 +22,8 @@ interface HomeScreenProps {
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate }) => {
+  const locale = useSystemStore((s) => s.locale);
+  const t = TRANSLATIONS[locale] ?? TRANSLATIONS.en;
   const health = useSystemStore((s) => s.health);
   const hardwareProfile = useSystemStore((s) => s.hardwareProfile);
   const autoOptimizeForHardware = useSystemStore((s) => s.autoOptimizeForHardware);
@@ -38,7 +41,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate }) => {
           <div className="flex flex-wrap items-center gap-2">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#00F0B5]/15 border border-[#00F0B5]/30 text-[#00F0B5] text-xs font-bold">
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>100% Local Offline Studio Engine • Zero Cloud Dependency</span>
+              <span>100% Local AI Processing • Bundled HTDemucs Offline • Zero Cloud Uploads</span>
             </div>
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#6C63FF]/20 border border-[#6C63FF]/40 text-slate-200 text-xs font-mono font-semibold">
               <Cpu className="w-3.5 h-3.5 text-[#00F0B5]" />
@@ -63,7 +66,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate }) => {
             className="flex items-center gap-2.5 px-6 py-3.5 rounded-2xl bg-gradient-to-r from-[#6C63FF] via-[#7C66FF] to-[#00F0B5] text-slate-950 font-black text-xs tracking-wide shadow-xl shadow-[#6C63FF]/30 hover:opacity-95 hover:scale-[1.02] active:scale-[0.98] transition-all"
           >
             <Play className="w-4 h-4 fill-current" />
-            <span>Open Separation Workstation ({selectedFiles.length} queued)</span>
+            <span>{t.nav_separate} ({selectedFiles.length} queued)</span>
           </button>
           <button
             type="button"
@@ -79,7 +82,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate }) => {
             className="flex items-center gap-2 px-4 py-3.5 rounded-2xl bg-[#11131C] border border-[#252B3D] hover:border-[#6C63FF] text-slate-200 font-bold text-xs transition"
           >
             <Sliders className="w-4 h-4 text-[#00F0B5]" />
-            <span>Live Stem Mixer</span>
+            <span>{t.nav_results}</span>
           </button>
         </div>
       </div>
@@ -109,7 +112,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate }) => {
             </span>
           </div>
           <div className="text-xl font-black text-white truncate">
-            {health.cuda_available ? "CUDA + FP16 GPU" : `${hardwareProfile.logical_cores}T AVX2 CPU`}
+            {health.cuda_available
+              ? "CUDA + FP16 GPU"
+              : `${hardwareProfile.logical_cores}T ${
+                  hardwareProfile.simd_features?.length
+                    ? hardwareProfile.simd_features.join("/")
+                    : "CPU"
+                }`}
           </div>
           <div className="text-xs text-slate-400 truncate font-mono">
             {hardwareProfile.cpu_model} • {(hardwareProfile.total_ram_mb / 1024).toFixed(0)} GB RAM
@@ -156,7 +165,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate }) => {
               onClick={() => onNavigate("results")}
               className="text-xs text-[#00F0B5] hover:underline font-bold"
             >
-              View All in Mixer →
+              {t.nav_results} →
             </button>
           </div>
 

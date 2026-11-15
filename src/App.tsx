@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from "react";
-import { AlertCircle, AlertTriangle, CheckCircle2, Cpu, FolderOpen, FolderOutput, Moon, Sparkles, Sun, Wand2, X, Zap } from "lucide-react";
-import { PerformanceProfileMode } from "./bindings";
-import { ScreenId, Sidebar } from "./components/Sidebar";
-import { invokeCommand } from "./ipc";
+import { AlertCircle, AlertTriangle, CheckCircle2, Cpu, FolderOpen, FolderOutput, Monitor, Moon, Sparkles, Sun, Wand2, X, Zap } from "lucide-react";
+import { AppScreen, PerformanceProfileMode } from "./bindings";
+import { Sidebar } from "./components/Sidebar";
+import { invokeCommand, isTauriRuntime } from "./ipc";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { ResultsScreen } from "./screens/ResultsScreen";
@@ -11,9 +11,15 @@ import { SettingsScreen } from "./screens/SettingsScreen";
 import { useJobsStore, useMixerStore, useSystemStore } from "./state/appStores";
 
 export const App: React.FC = () => {
-  const [activeScreen, setActiveScreen] = useState<ScreenId>("separate");
+  const activeScreen = useSystemStore((s) => s.activeScreen);
+  const setActiveScreen = useSystemStore((s) => s.setActiveScreen);
   const locale = useSystemStore((s) => s.locale);
   const theme = useSystemStore((s) => s.theme);
+  const [systemPrefersLight, setSystemPrefersLight] = useState<boolean>(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: light)").matches
+      : false
+  );
   const uiScale = useSystemStore((s) => s.uiScale);
   const highContrast = useSystemStore((s) => s.highContrast);
   const reducedMotion = useSystemStore((s) => s.reducedMotion);
@@ -37,7 +43,24 @@ export const App: React.FC = () => {
   const activeJobId = useJobsStore((s) => s.activeJobId);
 
   const isRtl = locale === "ar";
-  const isLight = theme === "light";
+  const effectiveTheme = theme === "system" ? (systemPrefersLight ? "light" : "dark") : theme;
+  const isLight = effectiveTheme === "light";
+
+  // Track OS theme changes when "system" mode is active & sync document root data-theme
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const listener = (e: MediaQueryListEvent) => setSystemPrefersLight(e.matches);
+    mq.addEventListener("change", listener);
+    return () => mq.removeEventListener("change", listener);
+  }, []);
+
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.documentElement.dataset.theme = effectiveTheme;
+      document.documentElement.style.colorScheme = effectiveTheme;
+    }
+  }, [effectiveTheme]);
 
   // Initialize SQLite state, outputs, history, hardware profile & settings on mount
   useEffect(() => {
@@ -46,11 +69,16 @@ export const App: React.FC = () => {
 
   // Global keyboard shortcuts (Workstream G)
   useEffect(() => {
+    const screenOrder: AppScreen[] = ["home", "separate", "results", "history", "settings"];
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select") return;
 
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      if ((e.ctrlKey || e.metaKey) && ["1", "2", "3", "4", "5"].includes(e.key)) {
+        e.preventDefault();
+        const target = screenOrder[Number(e.key) - 1];
+        if (target) setActiveScreen(target);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
         startSeparationBatch();
       } else if (e.key === "Escape" && activeJobId) {
@@ -62,7 +90,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeJobId, activeScreen, cancelJob, startSeparationBatch]);
+  }, [activeJobId, activeScreen, cancelJob, setActiveScreen, startSeparationBatch]);
 
   // Unified timer-based auto-dismiss for system notification banner (prevents stacking)
   useEffect(() => {
@@ -76,7 +104,7 @@ export const App: React.FC = () => {
   return (
     <div
       dir={isRtl ? "rtl" : "ltr"}
-      data-theme={theme}
+      data-theme={effectiveTheme}
       style={{ fontSize: `${uiScale}%` }}
       className={`h-screen w-screen flex overflow-hidden ${
         isLight ? "bg-slate-100 text-slate-900" : "bg-[#0F1016] text-slate-100"
@@ -116,12 +144,21 @@ export const App: React.FC = () => {
 
             <button
               type="button"
-              aria-label="Toggle Light or Dark Theme"
-              onClick={() => setTheme(isLight ? "dark" : "light")}
+              aria-label="Cycle Dark, Light, or System Theme"
+              title={`Theme: ${theme} (click to cycle Dark / Light / System)`}
+              onClick={() =>
+                setTheme(theme === "dark" ? "light" : theme === "light" ? "system" : "dark")
+              }
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#171A26] border border-[#252B3D] hover:border-[#6C63FF] text-slate-200 font-medium transition"
             >
-              {isLight ? <Moon className="w-3.5 h-3.5 text-[#6C63FF]" /> : <Sun className="w-3.5 h-3.5 text-[#FFB020]" />}
-              <span>{isLight ? "Dark" : "Light"}</span>
+              {theme === "system" ? (
+                <Monitor className="w-3.5 h-3.5 text-[#00F0B5]" />
+              ) : isLight ? (
+                <Sun className="w-3.5 h-3.5 text-[#FFB020]" />
+              ) : (
+                <Moon className="w-3.5 h-3.5 text-[#6C63FF]" />
+              )}
+              <span>{theme === "system" ? "System" : isLight ? "Light" : "Dark"}</span>
             </button>
 
             <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#171A26] border border-[#252B3D] text-[11px] font-mono text-[#00F0B5]">
@@ -245,7 +282,7 @@ export const App: React.FC = () => {
                       key={mode}
                       type="button"
                       onClick={() => setPerformanceProfileMode(mode)}
-                      className={`p-3 rounded-xl border text-left transition ${
+                      className={`p-3 rounded-xl border text-start transition ${
                         activeProfileMode === mode
                           ? "bg-[#6C63FF]/20 border-[#6C63FF] text-white"
                           : "bg-[#0F1016] border-[#25293A] text-slate-300 hover:border-slate-500"
@@ -278,7 +315,7 @@ export const App: React.FC = () => {
                   type="text"
                   value={customOutputDir}
                   onChange={(e) => setCustomOutputDir(e.target.value)}
-                  placeholder="C:\Users\Lam3y\Music\output_vocals (default alongside source)"
+                  placeholder="Default: Music/VocalPro folder"
                   className="flex-1 bg-[#0F1016] border border-[#25293A] rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:border-[#6C63FF] focus:outline-none"
                 />
                 <button
@@ -298,15 +335,25 @@ export const App: React.FC = () => {
             <div className="flex flex-wrap items-center justify-end gap-3 pt-2 border-t border-[#25293A]">
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
+                  const fallbackSample = "benchmarks/reference-set/track_01_pop_stereo_44k.wav";
+                  const sampleTrack = isTauriRuntime()
+                    ? (await invokeCommand<string>("resolve_sample_track")) || fallbackSample
+                    : fallbackSample;
+                  useJobsStore.getState().addFiles([sampleTrack]);
                   completeOnboarding();
                   setActiveScreen("separate");
-                  startSeparationBatch();
+                  useSystemStore
+                    .getState()
+                    .showBanner(
+                      "Loaded reference studio sample 'track_01_pop_stereo_44k.wav' into queue — preview or press Start Separation!",
+                      "success"
+                    );
                 }}
                 className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#0F1016] border border-[#00D4AA] text-[#00D4AA] text-xs font-bold hover:bg-[#00D4AA]/10 transition"
               >
                 <Zap className="w-4 h-4" />
-                <span>Try Sample Separation Track</span>
+                <span>Load Sample Studio Track</span>
               </button>
 
               <button

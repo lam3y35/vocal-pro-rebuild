@@ -8,7 +8,9 @@ import {
   Eye,
   FileCheck2,
   FolderCog,
+  FolderOpen,
   Gauge,
+  HardDrive,
   Monitor,
   RotateCcw,
   Search,
@@ -19,6 +21,7 @@ import {
   Zap,
 } from "lucide-react";
 import { DEFAULT_JOB_OPTIONS, PerformanceProfileMode, WavBitDepth } from "../bindings";
+import { invokeCommandStrict, isTauriRuntime } from "../ipc";
 import { useJobsStore, useSystemStore } from "../state/appStores";
 
 export const SettingsScreen: React.FC = () => {
@@ -32,7 +35,6 @@ export const SettingsScreen: React.FC = () => {
   const highContrast = useSystemStore((s) => s.highContrast);
   const reducedMotion = useSystemStore((s) => s.reducedMotion);
   const alwaysOnTop = useSystemStore((s) => s.alwaysOnTop);
-  const minimizeToTray = useSystemStore((s) => s.minimizeToTray);
   const settingsSearchQuery = useSystemStore((s) => s.settingsSearchQuery);
   const settingsViewMode = useSystemStore((s) => s.settingsViewMode);
   const namingTemplate = useSystemStore((s) => s.namingTemplate);
@@ -44,13 +46,16 @@ export const SettingsScreen: React.FC = () => {
   const lastCalibrationResult = useSystemStore((s) => s.lastCalibrationResult);
   const hardwareProfile = useSystemStore((s) => s.hardwareProfile);
   const health = useSystemStore((s) => s.health);
+  const models = useSystemStore((s) => s.models);
+  const downloadingModelId = useSystemStore((s) => s.downloadingModelId);
+  const showBanner = useSystemStore((s) => s.showBanner);
 
   const setTheme = useSystemStore((s) => s.setTheme);
   const setUiScale = useSystemStore((s) => s.setUiScale);
   const setHighContrast = useSystemStore((s) => s.setHighContrast);
   const setReducedMotion = useSystemStore((s) => s.setReducedMotion);
   const setAlwaysOnTop = useSystemStore((s) => s.setAlwaysOnTop);
-  const setMinimizeToTray = useSystemStore((s) => s.setMinimizeToTray);
+  const downloadModel = useSystemStore((s) => s.downloadModel);
   const setShowOnboardingModal = useSystemStore((s) => s.setShowOnboardingModal);
   const setSettingsSearchQuery = useSystemStore((s) => s.setSettingsSearchQuery);
   const setSettingsViewMode = useSystemStore((s) => s.setSettingsViewMode);
@@ -81,14 +86,14 @@ export const SettingsScreen: React.FC = () => {
       {/* Settings Search Bar + Basic/Advanced View Toggle + Import/Export/Reset */}
       <div className="rounded-xl bg-[#161822] border border-[#25293A] p-3.5 flex flex-wrap items-center justify-between gap-3">
         <div className="relative flex-1 min-w-[220px]">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <Search className="w-4 h-4 text-slate-400 absolute start-3 top-1/2 -translate-y-1/2" />
           <input
             type="search"
             aria-label="Search settings"
             value={settingsSearchQuery}
             onChange={(e) => setSettingsSearchQuery(e.target.value)}
             placeholder="Search all 8 settings sections (gate, denoise, naming, theme, GPU, cache, FFmpeg)..."
-            className="w-full bg-[#0F1016] border border-[#25293A] rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-[#6C63FF]"
+            className="w-full bg-[#0F1016] border border-[#25293A] rounded-lg ps-9 pe-3 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-[#6C63FF]"
           />
         </div>
 
@@ -302,7 +307,7 @@ export const SettingsScreen: React.FC = () => {
               </div>
               <div className="text-[11px] text-slate-400 font-mono mt-1">
                 Disk: {hardwareProfile.disk_free_gb} GB •{" "}
-                {hardwareProfile.temp_drive_speed_mb_s || 1200} MB/s
+                {hardwareProfile.temp_drive_speed_mbps ?? hardwareProfile.temp_drive_speed_mb_s ?? 1200} MB/s
               </div>
             </div>
 
@@ -951,16 +956,6 @@ export const SettingsScreen: React.FC = () => {
               <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={minimizeToTray}
-                  onChange={(e) => setMinimizeToTray(e.target.checked)}
-                  className="accent-[#6C63FF]"
-                />
-                <span>Minimize to System Tray</span>
-              </label>
-
-              <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
-                <input
-                  type="checkbox"
                   checked={options.safe_mode}
                   onChange={(e) => setOptions({ safe_mode: e.target.checked })}
                   className="accent-[#FFB800]"
@@ -998,6 +993,98 @@ export const SettingsScreen: React.FC = () => {
                 <Archive className="w-4 h-4" />
                 <span>Export Diagnostic Log Bundle (.zip)</span>
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* AI Model Registry & Local Weights Status */}
+        {matchesSearch("model registry weights checkpoints demucs htdemucs mdx cached offline") && (
+          <div
+            className="rounded-xl bg-[#161822] border border-[#25293A] p-5 space-y-4"
+            data-testid="model-registry-card"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                  <HardDrive className="w-4 h-4 text-[#00D4AA]" />
+                  <span>AI Model Registry &amp; Local Weights Status</span>
+                </h2>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Offline-ready Demucs models are read from{" "}
+                  <code className="text-slate-300">%LOCALAPPDATA%\VocalPro\models</code> or PyTorch Hub checkpoints.
+                  Uncached models auto-download on first separation.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (isTauriRuntime()) {
+                    try {
+                      await invokeCommandStrict("open_folder", { path: "@models" });
+                    } catch (err: any) {
+                      showBanner(
+                        `Unable to open models folder: ${String(err?.message || err)}`,
+                        "error"
+                      );
+                    }
+                  } else {
+                    showBanner(
+                      "Desktop models folder: %LOCALAPPDATA%\\VocalPro\\models (or ~/.cache/torch/hub/checkpoints)",
+                      "info"
+                    );
+                  }
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0F1016] border border-[#25293A] hover:border-[#00D4AA] text-xs font-semibold text-slate-200 transition"
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-[#00D4AA]" />
+                <span>Open Models Folder</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              {models.map((m) => (
+                <div
+                  key={m.id}
+                  className="rounded-lg bg-[#0F1016] border border-[#25293A] p-3 flex flex-col justify-between gap-2"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-white font-semibold truncate">{m.display_name}</div>
+                      <div className="text-[11px] font-mono text-slate-400">
+                        id: {m.id} • {m.relative_compute.toFixed(1)}x compute
+                      </div>
+                    </div>
+                    <span
+                      className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                        m.cached
+                          ? "bg-[#00D4AA]/15 border-[#00D4AA]/40 text-[#00D4AA]"
+                          : "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                      }`}
+                    >
+                      {m.cached ? "Ready Locally" : "Auto-Downloads on Use"}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">{m.description}</p>
+                  <div className="flex items-center justify-between gap-2 pt-1">
+                    <div className="text-[10px] font-mono text-slate-400">
+                      Stems ({m.stems.length}): {m.stems.join(", ")}
+                    </div>
+                    {!m.cached && (
+                      <button
+                        type="button"
+                        disabled={downloadingModelId !== null}
+                        onClick={() => void downloadModel(m.id)}
+                        className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#6C63FF] hover:bg-[#5B52EE] disabled:opacity-50 text-[10px] font-bold text-white transition"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>
+                          {downloadingModelId === m.id ? "Downloading..." : "Download Model"}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}

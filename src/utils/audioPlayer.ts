@@ -10,6 +10,7 @@ export interface TrackConfig {
   name: string;
   path: string;
   gain: number;
+  pan?: number;
   mute: boolean;
   solo: boolean;
   duration_s?: number;
@@ -21,7 +22,9 @@ interface InternalTrack {
   element: HTMLAudioElement;
   sourceNode: MediaElementAudioSourceNode | null;
   gainNode: GainNode | null;
+  pannerNode: StereoPannerNode | null;
   gain: number;
+  pan: number;
   mute: boolean;
   solo: boolean;
   duration_s: number;
@@ -29,6 +32,7 @@ interface InternalTrack {
 
 export type TimeUpdateCallback = (playheadSec: number) => void;
 export type StateChangeCallback = (playing: boolean) => void;
+export type DurationChangeCallback = (durationSec: number) => void;
 
 export class SynchronizedAudioEngine {
   private tracks: Map<string, InternalTrack> = new Map();
@@ -39,6 +43,8 @@ export class SynchronizedAudioEngine {
   private syncTimer: ReturnType<typeof setInterval> | null = null;
   private onTimeUpdate: TimeUpdateCallback | null = null;
   private onStateChange: StateChangeCallback | null = null;
+  private onDurationChange: DurationChangeCallback | null = null;
+  private playRequestId = 0;
 
   constructor() {
     // Lazy AudioContext initialization on first user interaction
@@ -54,12 +60,18 @@ export class SynchronizedAudioEngine {
     return this.audioCtx;
   }
 
-  public setCallbacks(onTimeUpdate: TimeUpdateCallback, onStateChange: StateChangeCallback): void {
+  public setCallbacks(
+    onTimeUpdate: TimeUpdateCallback,
+    onStateChange: StateChangeCallback,
+    onDurationChange?: DurationChangeCallback
+  ): void {
     this.onTimeUpdate = onTimeUpdate;
     this.onStateChange = onStateChange;
+    this.onDurationChange = onDurationChange || null;
   }
 
   public loadStems(configs: TrackConfig[], toAssetUrlFn: (path: string) => string): void {
+    this.playRequestId += 1;
     this.stop();
     this.disposeTracks();
 
@@ -70,20 +82,53 @@ export class SynchronizedAudioEngine {
         const url = toAssetUrlFn(cfg.path);
         const audio = new Audio(url);
         audio.preload = "auto";
-        audio.crossOrigin = "anonymous";
+        const isLocalProtocol =
+          url.startsWith("file:") ||
+          url.startsWith("asset:") ||
+          url.startsWith("http://asset.localhost") ||
+          url.startsWith("https://asset.localhost");
+        if (!isLocalProtocol) {
+          audio.crossOrigin = "anonymous";
+        }
 
         let sourceNode: MediaElementAudioSourceNode | null = null;
         let gainNode: GainNode | null = null;
+        let pannerNode: StereoPannerNode | null = null;
+        const pan = Math.max(-1, Math.min(1, cfg.pan ?? 0));
 
         try {
           const ctx = this.getAudioContext();
           sourceNode = ctx.createMediaElementSource(audio);
           gainNode = ctx.createGain();
-          sourceNode.connect(gainNode);
-          gainNode.connect(ctx.destination);
+          if (typeof ctx.createStereoPanner === "function") {
+            pannerNode = ctx.createStereoPanner();
+            pannerNode.pan.value = pan;
+            sourceNode.connect(gainNode);
+            gainNode.connect(pannerNode);
+            pannerNode.connect(ctx.destination);
+          } else {
+            sourceNode.connect(gainNode);
+            gainNode.connect(ctx.destination);
+          }
         } catch {
           // Fallback if Web Audio context unavailable or restricted
         }
+
+        audio.addEventListener("loadedmetadata", () => {
+          const track = this.tracks.get(cfg.name);
+          if (!track || track.element !== audio) return;
+          if (Number.isFinite(audio.duration) && audio.duration > 0) {
+            track.duration_s = audio.duration;
+            const maxTrackDur = Array.from(this.tracks.values()).reduce(
+              (m, t) => Math.max(m, Number.isFinite(t.duration_s) ? t.duration_s : 0),
+              0
+            );
+            if (maxTrackDur > 0 && Math.abs(maxTrackDur - this.durationSec) > 0.05) {
+              this.durationSec = maxTrackDur;
+              this.onDurationChange?.(this.durationSec);
+            }
+          }
+        });
 
         const dur = cfg.duration_s || 0;
         if (dur > maxDuration) maxDuration = dur;
@@ -94,7 +139,9 @@ export class SynchronizedAudioEngine {
           element: audio,
           sourceNode,
           gainNode,
+          pannerNode,
           gain: cfg.gain ?? 1.0,
+          pan,
           mute: cfg.mute ?? false,
           solo: cfg.solo ?? false,
           duration_s: dur,
@@ -157,8 +204,24 @@ export class SynchronizedAudioEngine {
     this.syncVolumes();
   }
 
+  public setStemPan(name: string, pan: number): void {
+    const t = this.tracks.get(name);
+    if (!t) return;
+    const clamped = Math.max(-1, Math.min(1, pan));
+    t.pan = clamped;
+    const ctx = this.audioCtx;
+    if (t.pannerNode && ctx && ctx.state !== "closed") {
+      try {
+        t.pannerNode.pan.setTargetAtTime(clamped, ctx.currentTime, 0.015);
+      } catch {
+        t.pannerNode.pan.value = clamped;
+      }
+    }
+  }
+
   public async play(): Promise<void> {
     if (this.tracks.size === 0 || this.isPlaying) return;
+    const requestId = ++this.playRequestId;
 
     try {
       const ctx = this.getAudioContext();
@@ -194,16 +257,29 @@ export class SynchronizedAudioEngine {
             if (t.element.readyState >= 2) {
               resolve();
             } else {
+              let settled = false;
               const onCanPlay = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(fallbackTimer);
                 t.element.removeEventListener("canplay", onCanPlay);
                 resolve();
               };
+              const fallbackTimer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                t.element.removeEventListener("canplay", onCanPlay);
+                resolve();
+              }, 300);
               t.element.addEventListener("canplay", onCanPlay);
-              setTimeout(resolve, 300); // 300ms maximum barrier fallback
             }
           })
       )
     );
+
+    if (requestId !== this.playRequestId) {
+      return;
+    }
 
     this.syncVolumes();
 
@@ -216,6 +292,17 @@ export class SynchronizedAudioEngine {
       )
     );
 
+    if (requestId !== this.playRequestId) {
+      for (const t of trackList) {
+        try {
+          t.element.pause();
+        } catch {
+          // ignore
+        }
+      }
+      return;
+    }
+
     this.isPlaying = true;
     this.onStateChange?.(true);
 
@@ -223,6 +310,7 @@ export class SynchronizedAudioEngine {
   }
 
   public pause(): void {
+    this.playRequestId += 1;
     if (!this.isPlaying) return;
     this.stopSyncLoop();
 
@@ -264,6 +352,7 @@ export class SynchronizedAudioEngine {
   }
 
   public stop(): void {
+    this.playRequestId += 1;
     this.stopSyncLoop();
     for (const t of this.tracks.values()) {
       try {
@@ -288,8 +377,11 @@ export class SynchronizedAudioEngine {
       const trackList = Array.from(this.tracks.values());
       if (trackList.length === 0) return;
 
-      // Select active unmuted reference track for master clock
-      const master = trackList.find((t) => !t.mute && !isNaN(t.element.currentTime)) || trackList[0];
+      // Select active audible reference track (respecting solo) for master clock
+      const hasSolo = trackList.some((t) => t.solo);
+      const master =
+        trackList.find((t) => !t.mute && (!hasSolo || t.solo) && !isNaN(t.element.currentTime)) ||
+        trackList[0];
       if (!master || isNaN(master.element.currentTime)) return;
 
       const masterTime = master.element.currentTime;
@@ -347,6 +439,7 @@ export class SynchronizedAudioEngine {
         t.element.src = "";
         t.sourceNode?.disconnect();
         t.gainNode?.disconnect();
+        t.pannerNode?.disconnect();
       } catch {
         // ignore
       }

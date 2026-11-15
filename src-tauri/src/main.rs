@@ -216,6 +216,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_selftest(&ctx);
     }
 
+    const SUPPORTED_MEDIA_EXTS: &[&str] = &[
+        "mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif", "mp4",
+        "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v",
+    ];
+    let cli_files: Vec<String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .filter_map(|a| {
+            let p = std::path::Path::new(a);
+            if !p.is_file() {
+                return None;
+            }
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            if SUPPORTED_MEDIA_EXTS.contains(&ext.as_str()) {
+                Some(p.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !cli_files.is_empty() {
+        ctx.set_launch_files(cli_files);
+    }
+
     #[cfg(feature = "desktop-shell")]
     {
         // Eagerly warm up AI worker in background so AI engine is ready when UI finishes loading
@@ -255,8 +284,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bridge::calibrate_hardware,
                 bridge::mixer_load_folder,
                 bridge::mixer_set_gain,
+                bridge::mixer_set_pan,
                 bridge::mixer_set_mute,
                 bridge::mixer_set_solo,
+                bridge::mixer_seek,
                 bridge::mixer_export_mix,
                 bridge::mixer_export_separate,
                 bridge::list_outputs,
@@ -266,6 +297,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bridge::clear_download_history,
                 bridge::download_media_url,
                 bridge::list_models,
+                bridge::list_presets,
+                bridge::save_preset,
+                bridge::delete_preset,
                 bridge::register_file_associations,
                 bridge::create_desktop_shortcut,
                 bridge::export_diagnostic_bundle,
@@ -282,6 +316,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bridge::pick_audio_files,
                 bridge::pick_output_dir,
                 bridge::open_folder,
+                bridge::open_media_file,
+                bridge::consume_launch_files,
+                bridge::resolve_sample_track,
+                bridge::download_model,
             ])
             .build(tauri::generate_context!())?
             .run({

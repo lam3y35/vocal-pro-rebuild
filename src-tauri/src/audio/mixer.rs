@@ -37,6 +37,7 @@ pub struct StemTrack {
     pub window_valid_frames: AtomicUsize,
     pub window_samples: Vec<AtomicU32>,
     pub gain: AtomicF32,
+    pub pan: AtomicF32,
     pub mute: AtomicBool,
     pub solo: AtomicBool,
 }
@@ -116,6 +117,7 @@ pub struct StemTrackInfo {
     pub name: String,
     pub path: String,
     pub gain: f32,
+    pub pan: f32,
     pub mute: bool,
     pub solo: bool,
     pub duration_s: f64,
@@ -234,6 +236,7 @@ impl LiveStemMixer {
                 window_valid_frames: AtomicUsize::new(valid_initial),
                 window_samples,
                 gain: AtomicF32::new(1.0),
+                pan: AtomicF32::new(0.0),
                 mute: AtomicBool::new(false),
                 solo: AtomicBool::new(false),
             }));
@@ -264,6 +267,25 @@ impl LiveStemMixer {
             }
         }
         false
+    }
+
+    pub fn set_stem_pan(&self, stem_name: &str, pan: f32) -> bool {
+        let clamped = pan.clamp(-1.0, 1.0);
+        for s in &self.stems {
+            if s.name == stem_name {
+                s.pan.store(clamped);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn apply_pans_map(&self, pans: &HashMap<String, f32>) {
+        for s in &self.stems {
+            if let Some(&pan) = pans.get(&s.name) {
+                s.pan.store(pan.clamp(-1.0, 1.0));
+            }
+        }
     }
 
     pub fn set_stem_mute(&self, stem_name: &str, mute: bool) -> bool {
@@ -369,13 +391,16 @@ impl LiveStemMixer {
             for stem in &self.stems {
                 let is_solo = stem.solo.load(Ordering::Relaxed);
                 let is_mute = stem.mute.load(Ordering::Relaxed);
-                if (any_solo && !is_solo) || (!any_solo && is_mute) {
+                if is_mute || (any_solo && !is_solo) {
                     continue;
                 }
                 let g = stem.gain.load();
                 if g <= 0.0 {
                     continue;
                 }
+                let pan = stem.pan.load().clamp(-1.0, 1.0);
+                let l_pan = (1.0 - pan).min(1.0);
+                let r_pan = (1.0 + pan).min(1.0);
                 let win_start = stem.window_start_frame.load(Ordering::Relaxed);
                 let win_len = stem.window_valid_frames.load(Ordering::Relaxed);
                 if cur_frame >= win_start && cur_frame < win_start + win_len {
@@ -386,8 +411,8 @@ impl LiveStemMixer {
                         let s_r = f32::from_bits(
                             stem.window_samples[rel_idx + 1].load(Ordering::Relaxed),
                         );
-                        l += s_l * g;
-                        r += s_r * g;
+                        l += s_l * g * l_pan;
+                        r += s_r * g * r_pan;
                     }
                 }
             }
@@ -417,17 +442,27 @@ impl LiveStemMixer {
             for stem in &self.stems {
                 let is_solo = stem.solo.load(Ordering::Relaxed);
                 let is_mute = stem.mute.load(Ordering::Relaxed);
-                if (any_solo && !is_solo) || (!any_solo && is_mute) {
+                if is_mute || (any_solo && !is_solo) {
                     continue;
                 }
                 let g = stem.gain.load();
                 if g <= 0.0 {
                     continue;
                 }
+                let pan = stem.pan.load().clamp(-1.0, 1.0);
+                let l_pan = (1.0 - pan).min(1.0);
+                let r_pan = (1.0 + pan).min(1.0);
                 if let Ok(samples) = stem.read_frames_range(chunk_start, cur_chunk_frames) {
                     for (i, &val) in samples.iter().enumerate() {
                         if out_offset + i < mixed.len() {
-                            mixed[out_offset + i] += val * g;
+                            let ch_pan = if self.channels >= 2 && (i % self.channels) == 1 {
+                                r_pan
+                            } else if self.channels >= 2 && (i % self.channels) == 0 {
+                                l_pan
+                            } else {
+                                1.0
+                            };
+                            mixed[out_offset + i] += val * g * ch_pan;
                         }
                     }
                 }
@@ -457,6 +492,7 @@ impl LiveStemMixer {
                 name: s.name.clone(),
                 path: s.path.to_string_lossy().to_string(),
                 gain: s.gain.load(),
+                pan: s.pan.load(),
                 mute: s.mute.load(Ordering::Relaxed),
                 solo: s.solo.load(Ordering::Relaxed),
                 duration_s: dur,
@@ -549,4 +585,44 @@ pub fn discover_stems_in_folder(folder_path: &Path) -> AppResult<Vec<(String, Pa
     }
 
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn solo_and_muted_stem_stays_silent() {
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("vocals.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+        for _ in 0..1024 {
+            writer.write_sample(16000_i16).unwrap();
+            writer.write_sample(16000_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let mixer = LiveStemMixer::load_stems(
+            vec![("vocals".to_string(), wav_path)],
+            dir.path().to_path_buf(),
+        )
+        .unwrap();
+        mixer.set_stem_solo("vocals", true);
+        mixer.set_stem_mute("vocals", true);
+
+        let offline = mixer.render_full_mix(None);
+        assert!(offline.iter().all(|&s| s == 0.0), "muted+solo stem must be silent offline");
+
+        mixer.playing.store(true, Ordering::Relaxed);
+        let mut live = vec![0.0_f32; 256];
+        mixer.render_interleaved_frames(&mut live);
+        assert!(live.iter().all(|&s| s == 0.0), "muted+solo stem must be silent in live callback");
+    }
 }

@@ -289,6 +289,7 @@ fn test_adversarial_stem_solo_effective_volumes_permutations() {
                 name: name.to_string(),
                 path: format!("/path/{}.wav", name),
                 gain: *gain,
+                pan: 0.0,
                 mute: *mute,
                 solo: *solo,
                 duration_s: 10.0,

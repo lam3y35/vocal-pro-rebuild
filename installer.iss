@@ -61,9 +61,7 @@ Source: "dist\bundle\engine\*"; DestDir: "{app}\engine"; Flags: ignoreversion re
 Source: "worker\vocalpro_worker\*"; DestDir: "{app}\worker\vocalpro_worker"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 5. Preloaded Offline AI Models
-Source: "dist\bundle\models\*"; DestDir: "{localappdata}\VocalPro\models"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "dist\bundle\models\*"; DestDir: "{localappdata}\VocalPro\models\checkpoints"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "dist\bundle\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\vocalpro.ico"

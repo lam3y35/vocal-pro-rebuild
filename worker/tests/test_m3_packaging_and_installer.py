@@ -89,15 +89,16 @@ def test_installer_iss_asset_bundling_entries() -> None:
         r'Source:\s*"dist\\bundle\\models\\\*".*skipifsourcedoesntexist', content
     ), "Preloaded models must NOT have skipifsourcedoesntexist"
 
-    # Destination directories for models
-    assert '{localappdata}\\VocalPro\\models' in content, (
-        "Models must be staged to {localappdata}\\VocalPro\\models"
-    )
+    # Destination directory for models (single deduplicated checkpoints location for torch.hub)
     assert '{localappdata}\\VocalPro\\models\\checkpoints' in content, (
         "Models must be staged to {localappdata}\\VocalPro\\models\\checkpoints"
     )
-    assert '{app}\\models' in content, (
-        "Models must be staged to {app}\\models"
+    model_lines = [
+        line for line in content.splitlines()
+        if line.lstrip().startswith("Source:") and "dist\\bundle\\models" in line
+    ]
+    assert len(model_lines) == 1, (
+        f"Models must be staged once to avoid duplicating payload, found {len(model_lines)}"
     )
 
 
@@ -324,6 +325,24 @@ def test_engine_load_demucs_model_honors_models_dir(tmp_path: Path, monkeypatch:
     # In fast model mode, it should load cleanly
     model = engine.load_demucs_model("htdemucs", torch.device("cpu"))
     assert model is not None
+
+
+def test_resolve_local_models_hub_dir_populates_checkpoints_from_flat_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flat .th files under VOCALPRO_MODELS_DIR must be mirrored into checkpoints/ for torch.hub."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    flat_ckpt = models_dir / "955717e8-8726e21a.th"
+    flat_ckpt.write_bytes(b"stub-demucs-weights")
+
+    monkeypatch.setenv("VOCALPRO_MODELS_DIR", str(models_dir))
+    resolved = engine._resolve_local_models_hub_dir()
+
+    assert resolved == models_dir
+    staged = models_dir / "checkpoints" / "955717e8-8726e21a.th"
+    assert staged.is_file()
+    assert staged.read_bytes() == b"stub-demucs-weights"
 
 
 # ==============================================================================

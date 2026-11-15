@@ -50,7 +50,7 @@ set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 
 echo [3/4] Installing PyTorch Demucs & Studio DSP dependencies...
 "%VENV_PYTHON%" -m pip install --upgrade pip --timeout 120 --retries 5
-"%VENV_PYTHON%" -m pip install torch demucs soundfile numpy scipy librosa mido resampy platformdirs --timeout 120 --retries 5
+"%VENV_PYTHON%" -m pip install torch torchaudio demucs noisereduce soundfile numpy scipy librosa mido resampy platformdirs --timeout 120 --retries 5
 
 echo [4/4] Pre-installing and verifying default Demucs AI model weights...
 set "PYTHONPATH=%~dp0..\worker"

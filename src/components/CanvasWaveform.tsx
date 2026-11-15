@@ -19,6 +19,20 @@ export const CanvasWaveform: React.FC<CanvasWaveformProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const [hoverRatio, setHoverRatio] = useState<number | null>(null);
+  const [themeMode, setThemeMode] = useState<string>(() =>
+    typeof document !== "undefined" ? document.documentElement.dataset.theme || "dark" : "dark"
+  );
+
+  // 0. Track data-theme attribute mutations reactively
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
+    const htmlEl = document.documentElement;
+    const syncTheme = () => setThemeMode(htmlEl.dataset.theme || "dark");
+    syncTheme();
+    const obs = new MutationObserver(syncTheme);
+    obs.observe(htmlEl, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => obs.disconnect();
+  }, []);
 
   // 1. Observe container resize with clean lifecycle teardown
   useEffect(() => {
@@ -73,10 +87,21 @@ export const CanvasWaveform: React.FC<CanvasWaveformProps> = ({
     playedGradient.addColorStop(0.5, "#38BDF8");
     playedGradient.addColorStop(1, "#6C63FF");
 
-    // Unplayed gradient
+    const isLight = themeMode === "light";
+    ctx.fillStyle = isLight ? "#F1F5F9" : "#0C0E14";
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.strokeStyle = isLight ? "rgba(148, 163, 184, 0.35)" : "rgba(56, 189, 248, 0.12)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, midY);
+    ctx.lineTo(width, midY);
+    ctx.stroke();
+
+    // Unplayed gradient (adapts cleanly to Light vs Dark studio themes)
     const unplayedGradient = ctx.createLinearGradient(0, 0, 0, height);
-    unplayedGradient.addColorStop(0, "#2D344B");
-    unplayedGradient.addColorStop(1, "#1E2333");
+    unplayedGradient.addColorStop(0, isLight ? "#CBD5E1" : "#2D344B");
+    unplayedGradient.addColorStop(1, isLight ? "#94A3B8" : "#1E2333");
 
     // 3. 100% full-width normalized fractional sampling across entire peak array
     const hasPeaks = Array.isArray(peaks) && peaks.length > 0;
@@ -115,7 +140,7 @@ export const CanvasWaveform: React.FC<CanvasWaveformProps> = ({
     const playX = Math.max(2, Math.min(width - 2, (progressRatio || 0) * width));
     
     // Playhead line
-    ctx.strokeStyle = "#FFFFFF";
+    ctx.strokeStyle = isLight ? "#0F172A" : "#FFFFFF";
     ctx.lineWidth = 1.5;
     ctx.shadowColor = accentColor;
     ctx.shadowBlur = 6;
@@ -134,7 +159,7 @@ export const CanvasWaveform: React.FC<CanvasWaveformProps> = ({
     if (hoverRatio !== null && hoverRatio !== progressRatio) {
       const hoverX = Math.max(0, Math.min(width, hoverRatio * width));
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.strokeStyle = isLight ? "rgba(15, 23, 42, 0.4)" : "rgba(255, 255, 255, 0.4)";
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
@@ -143,7 +168,7 @@ export const CanvasWaveform: React.FC<CanvasWaveformProps> = ({
       ctx.stroke();
       ctx.setLineDash([]);
     }
-  }, [peaks, progressRatio, height, accentColor, hoverRatio, containerWidth]);
+  }, [peaks, progressRatio, height, accentColor, hoverRatio, containerWidth, themeMode]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!onSeekRatio || !canvasRef.current) return;

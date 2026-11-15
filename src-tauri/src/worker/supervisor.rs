@@ -103,6 +103,7 @@ struct SupervisorInner {
     slots: Vec<WorkerProcessSlot>,
     max_concurrent_workers: usize,
     queue_paused: bool,
+    shutting_down: bool,
     job_to_slot: HashMap<String, usize>,
     health: WorkerHealth,
     pending: HashMap<String, oneshot::Sender<WorkerEvent>>,
@@ -119,6 +120,7 @@ pub struct WorkerSupervisor {
     fast_test_model: bool,
     models_dir: PathBuf,
     inner: Arc<Mutex<SupervisorInner>>,
+    spawn_lock: Arc<Mutex<()>>,
     slot_notify: Arc<Notify>,
     event_tx: broadcast::Sender<WorkerEvent>,
 }
@@ -165,6 +167,7 @@ impl WorkerSupervisor {
             slots: Vec::new(),
             max_concurrent_workers: default_concurrency,
             queue_paused: false,
+            shutting_down: false,
             job_to_slot: HashMap::new(),
             health: WorkerHealth {
                 running: false,
@@ -192,6 +195,7 @@ impl WorkerSupervisor {
             fast_test_model,
             models_dir,
             inner: Arc::new(Mutex::new(inner)),
+            spawn_lock: Arc::new(Mutex::new(())),
             slot_notify: Arc::new(Notify::new()),
             event_tx,
         }
@@ -199,6 +203,33 @@ impl WorkerSupervisor {
 
     pub fn models_dir(&self) -> &Path {
         &self.models_dir
+    }
+
+    pub fn python_bin(&self) -> &Path {
+        &self.python_bin
+    }
+
+    pub fn worker_pythonpath(&self) -> &Path {
+        &self.worker_pythonpath
+    }
+
+    fn record_startup_failure(&self, summary: String) -> AppError {
+        let mut g = self.lock_inner();
+        let diag = g
+            .logs
+            .iter()
+            .rev()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let msg = format!("{}\nDiagnostics:\n{}", summary, diag);
+        g.health.running = false;
+        g.health.last_error = Some(msg.clone());
+        AppError::System(msg)
     }
 
     /// Current hard cap (RAM, physical cores, VRAM) for concurrent workers on this machine.
@@ -245,15 +276,17 @@ impl WorkerSupervisor {
     }
 
     pub fn set_job_priority(&self, job_id: &str, priority: &str) -> Option<JobRecord> {
-        self.inner
-            .lock()
-            .unwrap()
-            .queue
-            .set_priority(job_id, priority)
+        let updated = self.lock_inner().queue.set_priority(job_id, priority);
+        self.slot_notify.notify_waiters();
+        updated
     }
 
     pub fn reorder_job(&self, job_id: &str, new_index: usize) -> bool {
-        self.lock_inner().queue.reorder(job_id, new_index)
+        let ok = self.lock_inner().queue.reorder(job_id, new_index);
+        if ok {
+            self.slot_notify.notify_waiters();
+        }
+        ok
     }
 
     pub fn restore_jobs(&self, records: Vec<JobRecord>) {
@@ -265,6 +298,16 @@ impl WorkerSupervisor {
     }
 
     fn spawn_slot(&self, slot_id: usize) -> AppResult<()> {
+        let _spawn_guard = self
+            .spawn_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        {
+            let guard = self.lock_inner();
+            if slot_id < guard.slots.len() && guard.slots[slot_id].running {
+                return Ok(());
+            }
+        }
         let mut cmd = Command::new(&self.python_bin);
         crate::system::silent_command(&mut cmd);
 
@@ -281,6 +324,12 @@ impl WorkerSupervisor {
         let models_dir_str = self.models_dir.to_string_lossy().to_string();
         cmd.env("TORCH_HOME", &models_dir_str)
             .env("VOCALPRO_MODELS_DIR", &models_dir_str);
+
+        let resolved_ffmpeg = crate::system::resolve_ffmpeg_path();
+        if resolved_ffmpeg.is_file() {
+            let resolved_ffmpeg_str = resolved_ffmpeg.to_string_lossy().to_string();
+            cmd.env("VOCALPRO_FFMPEG", &resolved_ffmpeg_str);
+        }
 
         if self.fast_test_model {
             cmd.env("VOCALPRO_TEST_FAST_MODEL", "1");
@@ -355,38 +404,53 @@ impl WorkerSupervisor {
             }
         });
 
-        let mut stdout_reader = BufReader::new(stdout);
-        let mut first_line = String::new();
-        stdout_reader.read_line(&mut first_line)?;
-        if first_line.trim().is_empty() {
-            let recent_logs = {
-                let g = self.lock_inner();
-                g.logs.iter().rev().take(10).cloned().collect::<Vec<_>>()
+        let (handshake_tx, handshake_rx) = std::sync::mpsc::sync_channel::<
+            Result<(BufReader<std::process::ChildStdout>, String), std::io::Error>,
+        >(1);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let res = reader.read_line(&mut line).map(|_| (reader, line));
+            let _ = handshake_tx.send(res);
+        });
+        let (stdout_reader, first_line) =
+            match handshake_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(Ok((reader, line))) => (reader, line),
+                Ok(Err(e)) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(self.record_startup_failure(format!(
+                        "Worker slot {} startup handshake timed out after 30s.",
+                        slot_id
+                    )));
+                }
             };
-            let msg = format!(
-                "Worker slot {} exited prematurely during startup. Diagnostics:\n{}",
-                slot_id,
-                recent_logs.into_iter().rev().collect::<Vec<_>>().join("\n")
-            );
-            if let Ok(mut g) = self.inner.lock() {
-                g.health.running = false;
-                g.health.last_error = Some(msg.clone());
-            }
-            return Err(AppError::System(msg));
+        if first_line.trim().is_empty() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(self.record_startup_failure(format!(
+                "Worker slot {} exited prematurely during startup.",
+                slot_id
+            )));
         }
-        let initial_ev: WorkerEvent = serde_json::from_str(first_line.trim()).map_err(|e| {
-            let msg = format!(
-                "Invalid startup handshake from worker slot {} ({:?}): {}",
-                slot_id, first_line, e
-            );
-            if let Ok(mut g) = self.inner.lock() {
-                g.health.running = false;
-                g.health.last_error = Some(msg.clone());
+        let initial_ev: WorkerEvent = match serde_json::from_str(first_line.trim()) {
+            Ok(ev) => ev,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(self.record_startup_failure(format!(
+                    "Invalid startup handshake from worker slot {} ({:?}): {}",
+                    slot_id, first_line, e
+                )));
             }
-            AppError::System(msg)
-        })?;
+        };
 
-        {
+        let prev_child = {
             let mut guard = self.lock_inner();
             if let WorkerEvent::Ready {
                 worker_version,
@@ -419,6 +483,7 @@ impl WorkerSupervisor {
                 });
             }
 
+            let prev_child = guard.slots[slot_id].child.take();
             guard.slots[slot_id] = WorkerProcessSlot {
                 slot_id: slot_id as u32,
                 pid,
@@ -429,6 +494,11 @@ impl WorkerSupervisor {
                 active_cmd_id: None,
             };
             Self::refresh_health_slots(&mut guard);
+            prev_child
+        };
+        if let Some(mut prev_child) = prev_child {
+            let _ = prev_child.kill();
+            let _ = prev_child.wait();
         }
 
         // Spawn stdout reader thread for this slot
@@ -644,6 +714,7 @@ impl WorkerSupervisor {
     }
 
     pub fn start(&self) -> AppResult<WorkerHealth> {
+        self.lock_inner().shutting_down = false;
         self.spawn_slot(0)?;
         Ok(self.health())
     }
@@ -689,7 +760,27 @@ impl WorkerSupervisor {
             let mut need_spawn: Option<usize> = None;
             {
                 let mut guard = self.lock_inner();
-                if !guard.queue_paused {
+                if guard.shutting_down {
+                    guard.queue.mark_failed(
+                        job_id,
+                        "SHUTDOWN".to_string(),
+                        "Worker supervisor shutting down".to_string(),
+                    );
+                    return Err(AppError::System("Worker supervisor shutting down".to_string()));
+                }
+                if guard
+                    .queue
+                    .get(job_id)
+                    .map(|r| r.status == crate::worker::job_queue::JobStatus::Cancelled)
+                    .unwrap_or(false)
+                {
+                    return Err(AppError::Worker {
+                        code: "CANCELLED".to_string(),
+                        message: "Job cancelled while queued".to_string(),
+                        detail: None,
+                    });
+                }
+                if !guard.queue_paused && guard.queue.is_next_queued(job_id) {
                     let max_w = guard.max_concurrent_workers.max(1);
                     // 1. Check if any already-running slot < max_w is idle
                     for idx in 0..guard.slots.len().min(max_w) {
@@ -699,6 +790,8 @@ impl WorkerSupervisor {
                             guard.job_to_slot.insert(job_id.to_string(), idx);
                             guard.queue.assign_slot(job_id, idx as u32);
                             Self::refresh_health_slots(&mut guard);
+                            drop(guard);
+                            self.slot_notify.notify_waiters();
                             return Ok(idx);
                         }
                     }
@@ -713,19 +806,67 @@ impl WorkerSupervisor {
             }
 
             if let Some(slot_idx) = need_spawn {
-                self.spawn_slot(slot_idx)?;
-                let mut guard = self.lock_inner();
-                if !guard.queue_paused
-                    && slot_idx < guard.slots.len()
-                    && guard.slots[slot_idx].running
-                    && guard.slots[slot_idx].active_job_id.is_none()
-                {
-                    guard.slots[slot_idx].active_job_id = Some(job_id.to_string());
-                    guard.slots[slot_idx].active_cmd_id = Some(cmd_id.to_string());
-                    guard.job_to_slot.insert(job_id.to_string(), slot_idx);
-                    guard.queue.assign_slot(job_id, slot_idx as u32);
-                    Self::refresh_health_slots(&mut guard);
-                    return Ok(slot_idx);
+                if let Err(e) = self.spawn_slot(slot_idx) {
+                    {
+                        let mut guard = self.lock_inner();
+                        guard.queue.mark_failed(
+                            job_id,
+                            "WORKER_SPAWN_FAILED".to_string(),
+                            e.to_string(),
+                        );
+                    }
+                    self.slot_notify.notify_waiters();
+                    return Err(e);
+                }
+                let mut claimed_slot = None;
+                let wake_other = {
+                    let mut guard = self.lock_inner();
+                    if guard.shutting_down {
+                        guard.queue.mark_failed(
+                            job_id,
+                            "SHUTDOWN".to_string(),
+                            "Worker supervisor shutting down".to_string(),
+                        );
+                        drop(guard);
+                        self.slot_notify.notify_waiters();
+                        return Err(AppError::System("Worker supervisor shutting down".to_string()));
+                    }
+                    if guard
+                        .queue
+                        .get(job_id)
+                        .map(|r| r.status == crate::worker::job_queue::JobStatus::Cancelled)
+                        .unwrap_or(false)
+                    {
+                        drop(guard);
+                        self.slot_notify.notify_waiters();
+                        return Err(AppError::Worker {
+                            code: "CANCELLED".to_string(),
+                            message: "Job cancelled while queued".to_string(),
+                            detail: None,
+                        });
+                    }
+                    if !guard.queue_paused
+                        && guard.queue.is_next_queued(job_id)
+                        && slot_idx < guard.slots.len()
+                        && guard.slots[slot_idx].running
+                        && guard.slots[slot_idx].active_job_id.is_none()
+                    {
+                        guard.slots[slot_idx].active_job_id = Some(job_id.to_string());
+                        guard.slots[slot_idx].active_cmd_id = Some(cmd_id.to_string());
+                        guard.job_to_slot.insert(job_id.to_string(), slot_idx);
+                        guard.queue.assign_slot(job_id, slot_idx as u32);
+                        Self::refresh_health_slots(&mut guard);
+                        claimed_slot = Some(slot_idx);
+                        true
+                    } else {
+                        !guard.queue_paused && !guard.queue.is_next_queued(job_id)
+                    }
+                };
+                if wake_other {
+                    self.slot_notify.notify_waiters();
+                }
+                if let Some(idx) = claimed_slot {
+                    return Ok(idx);
                 }
             }
 
@@ -747,9 +888,12 @@ impl WorkerSupervisor {
         let (tx, rx) = oneshot::channel();
         {
             let mut guard = self.lock_inner();
-            guard.pending.insert(id, tx);
+            guard.pending.insert(id.clone(), tx);
         }
-        self.send_command_to_slot(0, &cmd)?;
+        if let Err(e) = self.send_command_to_slot(0, &cmd) {
+            self.lock_inner().pending.remove(&id);
+            return Err(e);
+        }
         rx.await
             .map_err(|_| AppError::System("Worker channel closed before response".to_string()))
     }
@@ -772,7 +916,13 @@ impl WorkerSupervisor {
         }
 
         let id = uuid::Uuid::new_v4().to_string();
-        let slot_idx = self.acquire_slot_for_job(&job_id, &id).await?;
+        let slot_idx = match self.acquire_slot_for_job(&job_id, &id).await {
+            Ok(idx) => idx,
+            Err(AppError::Worker { ref code, .. }) if code == "CANCELLED" => {
+                return Ok(WorkerEvent::JobCancelled { id, job_id });
+            }
+            Err(e) => return Err(e),
+        };
         let cmd = HostCommand::new(
             id.clone(),
             HostCommandPayload::Separate {
@@ -785,12 +935,14 @@ impl WorkerSupervisor {
         let (tx, rx) = oneshot::channel();
         {
             let mut guard = self.lock_inner();
-            guard.pending.insert(id, tx);
+            guard.pending.insert(id.clone(), tx);
         }
 
         if let Err(e) = self.send_command_to_slot(slot_idx, &cmd) {
             let mut guard = self.lock_inner();
+            guard.pending.remove(&id);
             guard.job_to_slot.remove(&job_id);
+            guard.queue.mark_failed(&job_id, "WORKER_SEND_FAILED".to_string(), e.to_string());
             if let Some(s) = guard.slots.get_mut(slot_idx) {
                 s.active_job_id = None;
                 s.active_cmd_id = None;
@@ -806,8 +958,26 @@ impl WorkerSupervisor {
 
     pub fn cancel_job(&self, job_id: &str) -> AppResult<()> {
         let target_slot = {
-            let guard = self.lock_inner();
-            guard.job_to_slot.get(job_id).copied().unwrap_or(0)
+            let mut guard = self.lock_inner();
+            if let Some(&slot) = guard.job_to_slot.get(job_id) {
+                slot
+            } else if guard
+                .queue
+                .get(job_id)
+                .map(|r| r.status == crate::worker::job_queue::JobStatus::Queued)
+                .unwrap_or(false)
+            {
+                guard.queue.mark_cancelled(job_id);
+                drop(guard);
+                let _ = self.event_tx.send(WorkerEvent::JobCancelled {
+                    id: String::new(),
+                    job_id: job_id.to_string(),
+                });
+                self.slot_notify.notify_waiters();
+                return Ok(());
+            } else {
+                0
+            }
         };
         let id = uuid::Uuid::new_v4().to_string();
         let cmd = HostCommand::new(
@@ -829,24 +999,29 @@ impl WorkerSupervisor {
     }
 
     pub fn shutdown(&self) {
-        let mut guard = self.lock_inner();
-        // Drop stdin immediately so all children receive EOF concurrently
-        for slot in &mut guard.slots {
-            slot.stdin.take();
-        }
-
-        // Kill and reap children immediately to guarantee sub-500ms shutdown across all slots
-        for slot in &mut guard.slots {
-            if let Some(mut child) = slot.child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
+        {
+            let mut guard = self.lock_inner();
+            guard.shutting_down = true;
+            // Drop stdin immediately so all children receive EOF concurrently
+            for slot in &mut guard.slots {
+                slot.stdin.take();
             }
-            slot.running = false;
-            slot.active_job_id = None;
-            slot.active_cmd_id = None;
+
+            // Kill and reap children immediately to guarantee sub-500ms shutdown across all slots
+            for slot in &mut guard.slots {
+                if let Some(mut child) = slot.child.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                slot.running = false;
+                slot.active_job_id = None;
+                slot.active_cmd_id = None;
+            }
+            guard.job_to_slot.clear();
+            let _ = std::mem::take(&mut guard.pending);
+            Self::refresh_health_slots(&mut guard);
         }
-        guard.job_to_slot.clear();
-        Self::refresh_health_slots(&mut guard);
+        self.slot_notify.notify_waiters();
     }
 }
 

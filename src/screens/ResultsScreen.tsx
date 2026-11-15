@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import {
   Activity,
   CheckCircle2,
@@ -12,15 +12,16 @@ import {
   Sliders,
   Sparkles,
 } from "lucide-react";
+import { WaveformSummary } from "../bindings";
 import { CanvasWaveform } from "../components/CanvasWaveform";
 import { StemMixerStrip } from "../components/StemMixerStrip";
 import { TRANSLATIONS } from "../i18n/translations";
-import { invokeCommand, toAssetUrl } from "../ipc";
-import { useJobsStore, useLibraryStore, useMixerStore, useSystemStore } from "../state/appStores";
+import { invokeCommand, invokeCommandStrict, isTauriRuntime, toAssetUrl } from "../ipc";
+import { useLibraryStore, useMixerStore, useSystemStore } from "../state/appStores";
 
 export const ResultsScreen: React.FC = () => {
   const locale = useSystemStore((s) => s.locale);
-  const t = TRANSLATIONS[locale];
+  const t = TRANSLATIONS[locale] ?? TRANSLATIONS.en;
 
   const outputs = useLibraryStore((s) => s.outputs);
   const selectedOutputId = useLibraryStore((s) => s.selectedOutputId);
@@ -36,8 +37,10 @@ export const ResultsScreen: React.FC = () => {
   const exportBitrate = useMixerStore((s) => s.exportBitrate);
   const lastExportMessage = useMixerStore((s) => s.lastExportMessage);
   const setStemGain = useMixerStore((s) => s.setStemGain);
+  const setStemPan = useMixerStore((s) => s.setStemPan);
   const toggleMute = useMixerStore((s) => s.toggleMute);
   const toggleSolo = useMixerStore((s) => s.toggleSolo);
+  const applyQuickMixMode = useMixerStore((s) => s.applyQuickMixMode);
   const resetStems = useMixerStore((s) => s.resetStems);
   const togglePlay = useMixerStore((s) => s.togglePlay);
   const seek = useMixerStore((s) => s.seek);
@@ -47,10 +50,34 @@ export const ResultsScreen: React.FC = () => {
   const exportSeparateStems = useMixerStore((s) => s.exportSeparateStems);
   const exportStemMidi = useMixerStore((s) => s.exportStemMidi);
 
-  const previewWaveform = useJobsStore((s) => s.previewWaveform);
-
   const activeOutput = outputs.find((o) => o.id === selectedOutputId) || outputs[0];
   const analysis = activeOutput ? analysisByFolder[activeOutput.folder_path] : undefined;
+  const [fastPeaks, setFastPeaks] = useState<number[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFastPeaks([]);
+    if (!activeOutput || analysis?.waveform?.length || !isTauriRuntime()) {
+      return;
+    }
+    const audioStem =
+      activeOutput.stems.find(
+        (s) =>
+          s.name !== "video_clean" &&
+          !/\.(mp4|mkv|mov|webm|avi|mid|midi)$/i.test(s.path)
+      ) || activeOutput.stems[0];
+    if (!audioStem?.path) return;
+    void invokeCommand<WaveformSummary>("fast_waveform", {
+      audioPath: audioStem.path,
+    }).then((wf) => {
+      if (!cancelled && wf && Array.isArray(wf.peaks) && wf.peaks.length > 0) {
+        setFastPeaks(wf.peaks);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeOutput?.folder_path, activeOutput?.stems?.length, analysis?.waveform?.length]);
 
   const videoStem = activeOutput?.stems.find(
     (s) =>
@@ -96,7 +123,7 @@ export const ResultsScreen: React.FC = () => {
                     key={out.id}
                     type="button"
                     onClick={() => selectOutput(out.id)}
-                    className={`w-full text-left rounded-xl p-3.5 border transition-all space-y-2 ${
+                    className={`w-full text-start rounded-xl p-3.5 border transition-all space-y-2 ${
                       selected
                         ? "bg-[#6C63FF]/20 border-[#6C63FF] text-white shadow-lg shadow-[#6C63FF]/20 ring-1 ring-[#6C63FF]"
                         : "bg-[#11131C] border-[#252B3D] text-slate-300 hover:border-slate-500 hover:bg-[#1E2232]"
@@ -151,7 +178,11 @@ export const ResultsScreen: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => invokeCommand("open_folder", { path: videoStem.path })}
+                    onClick={() =>
+                      invokeCommandStrict("open_media_file", { path: videoStem.path }).catch(() =>
+                        invokeCommand("open_folder", { path: videoStem.path })
+                      )
+                    }
                     className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-[#00F0B5] hover:bg-[#00F0B5]/90 text-slate-950 text-xs font-black transition shadow-lg shadow-[#00F0B5]/25"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" />
@@ -250,20 +281,20 @@ export const ResultsScreen: React.FC = () => {
                 {playing ? (
                   <Pause className="w-5 h-5 fill-current" />
                 ) : (
-                  <Play className="w-5 h-5 fill-current ml-0.5" />
+                  <Play className="w-5 h-5 fill-current ms-0.5" />
                 )}
               </button>
 
               <div className="flex-1 min-w-0">
                 <CanvasWaveform
-                  peaks={analysis?.waveform ?? previewWaveform}
+                  peaks={analysis?.waveform?.length ? analysis.waveform : fastPeaks}
                   progressRatio={durationSec > 0 ? playheadSec / durationSec : 0}
                   height={72}
                   onSeekRatio={(r) => seek(r * durationSec)}
                 />
               </div>
 
-              <div className="text-xs font-mono font-bold text-slate-200 w-28 text-right shrink-0 bg-[#11131C] border border-[#252B3D] px-3 py-2 rounded-xl">
+              <div className="text-xs font-mono font-bold text-slate-200 w-28 text-end shrink-0 bg-[#11131C] border border-[#252B3D] px-3 py-2 rounded-xl">
                 {formatTime(playheadSec)} / {formatTime(durationSec)}
               </div>
             </div>
@@ -275,17 +306,46 @@ export const ResultsScreen: React.FC = () => {
               <div className="flex items-center gap-2">
                 <Sliders className="w-4 h-4 text-[#6C63FF]" />
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                  Real-Time Multi-Stem DAW Console (&lt; 15 ms Latency)
+                  Real-Time Multi-Stem DAW Console (15 ms Smoothed Gain &amp; Pan)
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={resetStems}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#11131C] border border-[#252B3D] text-xs font-medium text-slate-300 hover:text-white transition"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Reset Levels (100%)</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center rounded-xl bg-[#11131C] border border-[#252B3D] p-0.5 text-[11px] font-bold">
+                  <button
+                    type="button"
+                    onClick={() => applyQuickMixMode("full")}
+                    title="A/B Compare: Full Original Mix"
+                    className="px-2.5 py-1 rounded-lg text-slate-300 hover:bg-[#6C63FF]/25 hover:text-white transition"
+                  >
+                    Full Mix
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyQuickMixMode("vocals_only")}
+                    title="A/B Compare: Isolated Vocals Only"
+                    className="px-2.5 py-1 rounded-lg text-[#00F0B5] hover:bg-[#00F0B5]/15 transition"
+                  >
+                    Vocals Only
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyQuickMixMode("instrumental")}
+                    title="A/B Compare: Instrumental / Karaoke (Vocals Muted)"
+                    className="px-2.5 py-1 rounded-lg text-[#FFB020] hover:bg-[#FFB020]/15 transition"
+                  >
+                    Instrumental
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={resetStems}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#11131C] border border-[#252B3D] text-xs font-medium text-slate-300 hover:text-white transition"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset Levels (100%)</span>
+                </button>
+              </div>
             </div>
 
             {stems.length === 0 ? (
@@ -310,6 +370,7 @@ export const ResultsScreen: React.FC = () => {
                     key={stem.name}
                     stem={stem}
                     onGainChange={(g) => setStemGain(stem.name, g)}
+                    onPanChange={(p) => setStemPan(stem.name, p)}
                     onToggleMute={() => toggleMute(stem.name)}
                     onToggleSolo={() => toggleSolo(stem.name)}
                     onExportMidi={() => exportStemMidi(stem.name)}
@@ -324,15 +385,19 @@ export const ResultsScreen: React.FC = () => {
                 <span className="text-slate-400 font-medium">Export Format:</span>
                 <select
                   value={exportFormat}
-                  onChange={(e) => setExportFormat(e.target.value as "wav" | "flac" | "mp3")}
+                  onChange={(e) =>
+                    setExportFormat(e.target.value as "wav" | "flac" | "mp3" | "ogg" | "aac")
+                  }
                   className="bg-[#11131C] border border-[#252B3D] rounded-xl px-3 py-2 text-slate-100 font-semibold focus:outline-none focus:border-[#6C63FF]"
                 >
                   <option value="wav">WAV (16-bit Master)</option>
                   <option value="flac">FLAC (Lossless)</option>
                   <option value="mp3">MP3 (Compact Studio)</option>
+                  <option value="ogg">OGG Vorbis (Open Studio)</option>
+                  <option value="aac">AAC / M4A (Apple / Video)</option>
                 </select>
 
-                {exportFormat === "mp3" && (
+                {(exportFormat === "mp3" || exportFormat === "ogg" || exportFormat === "aac") && (
                   <select
                     value={exportBitrate}
                     onChange={(e) =>

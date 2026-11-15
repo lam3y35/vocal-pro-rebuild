@@ -157,57 +157,147 @@ pub mod bridge {
     }
 
     #[tauri::command]
-    pub fn mixer_export_mix(
+    pub fn mixer_set_pan(
+        ctx: State<'_, AppContext>,
+        stem_name: String,
+        pan: f32,
+    ) -> Result<MixerSnapshot, String> {
+        ctx.mixer_set_pan(&stem_name, pan)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn mixer_seek(ctx: State<'_, AppContext>, position_sec: f64) -> Result<MixerSnapshot, String> {
+        ctx.mixer_seek(position_sec).map_err(|e| e.to_string())
+    }
+
+    fn has_unsafe_path(raw: &str) -> bool {
+        let trimmed = raw.trim();
+        trimmed.starts_with("\\\\")
+            || trimmed.starts_with("//")
+            || Path::new(trimmed)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+    }
+
+    #[tauri::command]
+    pub async fn mixer_export_mix(
         ctx: State<'_, AppContext>,
         output_path: String,
         format: String,
         bitrate: Option<String>,
+        pans: Option<HashMap<String, f32>>,
     ) -> Result<String, String> {
-        let folder = Path::new(&output_path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| ".".to_string());
-        let volumes = {
-            let guard = ctx.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(m) = guard.as_ref() {
-                let snap = m.snapshot();
-                crate::audio::mixer::LiveStemMixer::compute_effective_volumes(&snap.stems)
-            } else {
-                HashMap::new()
+        if has_unsafe_path(&output_path) {
+            return Err("Unsafe path ('..' or network share) is not allowed in export path".to_string());
+        }
+        let ctx_clone = ctx.inner().clone();
+        tokio::task::spawn_blocking(move || {
+            let (loaded_folder, volumes, mut active_pans) = {
+                let guard = ctx_clone
+                    .active_mixer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(m) = guard.as_ref() {
+                    let snap = m.snapshot();
+                    let vols =
+                        crate::audio::mixer::LiveStemMixer::compute_effective_volumes(&snap.stems);
+                    let pan_map: HashMap<String, f32> = snap
+                        .stems
+                        .iter()
+                        .map(|s| (s.name.clone(), s.pan))
+                        .collect();
+                    (Some(snap.folder_path), vols, pan_map)
+                } else {
+                    (None, HashMap::new(), HashMap::new())
+                }
+            };
+            if let Some(explicit_pans) = pans {
+                for (k, v) in explicit_pans {
+                    active_pans.insert(k, v);
+                }
             }
-        };
-        ctx.mixer_export_mix(
-            &folder,
-            &volumes,
-            &format,
-            bitrate.as_deref().unwrap_or("320k"),
-        )
-        .map_err(|e| e.to_string())
+            let requested = Path::new(&output_path);
+            let folder = if requested.is_dir() {
+                output_path.clone()
+            } else if let Some(active) = loaded_folder {
+                active
+            } else {
+                requested
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| ".".to_string())
+            };
+            let br = bitrate.as_deref().unwrap_or("320k");
+            let target_opt = if requested.is_dir()
+                || output_path.trim().is_empty()
+                || Path::new(&folder) == requested
+            {
+                None
+            } else {
+                Some(output_path.as_str())
+            };
+            ctx_clone
+                .mixer_export_mix_with_pans(
+                    &folder,
+                    target_opt,
+                    &volumes,
+                    Some(&active_pans),
+                    &format,
+                    br,
+                )
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("Export mix task panicked: {}", e))?
     }
 
     #[tauri::command]
-    pub fn mixer_export_separate(
+    pub async fn mixer_export_separate(
         ctx: State<'_, AppContext>,
         output_dir: String,
         format: String,
         bitrate: Option<String>,
     ) -> Result<Vec<String>, String> {
-        let volumes = {
-            let guard = ctx.active_mixer.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(m) = guard.as_ref() {
-                let snap = m.snapshot();
-                crate::audio::mixer::LiveStemMixer::compute_effective_volumes(&snap.stems)
-            } else {
-                HashMap::new()
-            }
-        };
-        ctx.mixer_export_separate(
-            &output_dir,
-            &volumes,
-            &format,
-            bitrate.as_deref().unwrap_or("320k"),
-        )
-        .map_err(|e| e.to_string())
+        if has_unsafe_path(&output_dir) {
+            return Err(
+                "Unsafe path ('..' or network share) is not allowed in output directory"
+                    .to_string(),
+            );
+        }
+        let ctx_clone = ctx.inner().clone();
+        tokio::task::spawn_blocking(move || {
+            let (volumes, pans) = {
+                let guard = ctx_clone
+                    .active_mixer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(m) = guard.as_ref() {
+                    let snap = m.snapshot();
+                    let vols =
+                        crate::audio::mixer::LiveStemMixer::compute_effective_volumes(&snap.stems);
+                    let pan_map: HashMap<String, f32> = snap
+                        .stems
+                        .iter()
+                        .map(|s| (s.name.clone(), s.pan))
+                        .collect();
+                    (vols, pan_map)
+                } else {
+                    (HashMap::new(), HashMap::new())
+                }
+            };
+            ctx_clone
+                .mixer_export_separate_with_pans(
+                    &output_dir,
+                    &volumes,
+                    Some(&pans),
+                    &format,
+                    bitrate.as_deref().unwrap_or("320k"),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("Export stems task panicked: {}", e))?
     }
 
     #[tauri::command]
@@ -240,18 +330,40 @@ pub mod bridge {
     }
 
     #[tauri::command]
-    pub fn download_media_url(
+    pub async fn download_media_url(
         ctx: State<'_, AppContext>,
         url: String,
         custom_name: Option<String>,
     ) -> Result<DownloadHistoryEntry, String> {
-        ctx.download_url(&url, custom_name.as_deref())
+        let ctx_clone = ctx.inner().clone();
+        tokio::task::spawn_blocking(move || ctx_clone.download_url(&url, custom_name.as_deref()))
+            .await
+            .map_err(|e| format!("Download task panicked: {}", e))?
             .map_err(|e| e.to_string())
     }
 
     #[tauri::command]
     pub fn list_models(ctx: State<'_, AppContext>) -> Vec<ModelInfo> {
         ctx.list_models()
+    }
+
+    #[tauri::command]
+    pub fn list_presets(ctx: State<'_, AppContext>) -> Result<Vec<(String, Value)>, String> {
+        ctx.list_presets().map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn save_preset(
+        ctx: State<'_, AppContext>,
+        name: String,
+        config: Value,
+    ) -> Result<(), String> {
+        ctx.save_preset(&name, &config).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn delete_preset(ctx: State<'_, AppContext>, name: String) -> Result<(), String> {
+        ctx.delete_preset(&name).map_err(|e| e.to_string())
     }
 
     #[tauri::command]
@@ -269,9 +381,11 @@ pub mod bridge {
         ctx: State<'_, AppContext>,
         target_zip: Option<String>,
     ) -> Result<String, String> {
-        let dest = target_zip
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.app_data_dir.join("vocalpro_diagnostics.zip"));
+        let dest = match target_zip {
+            Some(raw) => super::sanitize_export_target_path(&raw, &["zip"], "zip")
+                .map_err(|e| e.to_string())?,
+            None => ctx.app_data_dir.join("vocalpro_diagnostics.zip"),
+        };
         ctx.export_diagnostics(&dest).map_err(|e| e.to_string())
     }
 
@@ -383,12 +497,26 @@ pub mod bridge {
     }
 
     #[tauri::command]
-    pub fn open_folder(path: String) -> Result<(), String> {
+    pub fn open_folder(ctx: State<'_, AppContext>, path: String) -> Result<(), String> {
         let trimmed = path.trim();
         if trimmed.is_empty() {
             return Err("Path cannot be empty".to_string());
         }
-        let target = std::path::Path::new(trimmed);
+        if trimmed != "@models" && has_unsafe_path(trimmed) {
+            return Err("Invalid or unsafe folder path".to_string());
+        }
+        let models_override;
+        let target = if trimmed == "@models" || trimmed == "%LOCALAPPDATA%\\VocalPro\\models" {
+            let dir = ctx.models_dir().to_path_buf();
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            models_override = dir;
+            models_override.as_path()
+        } else {
+            std::path::Path::new(trimmed)
+        };
+        if !target.exists() {
+            return Err(format!("Path does not exist: {}", trimmed));
+        }
         let folder = if target.is_file() {
             target.parent().unwrap_or(target)
         } else {
@@ -419,5 +547,82 @@ pub mod bridge {
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    #[tauri::command]
+    pub fn open_media_file(path: String) -> Result<(), String> {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err("Path cannot be empty".to_string());
+        }
+        if has_unsafe_path(trimmed) {
+            return Err("Invalid or unsafe media file path".to_string());
+        }
+        let target = std::path::Path::new(trimmed);
+        if !target.is_file() {
+            return Err(format!("Media file does not exist: {}", trimmed));
+        }
+        let ext = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        const ALLOWED: &[&str] = &[
+            "mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif",
+            "mp4", "mkv", "webm", "avi", "mov", "m4v", "mid", "midi",
+        ];
+        if !ALLOWED.contains(&ext.as_str()) {
+            return Err(format!("Refusing to launch non-media file type: .{}", ext));
+        }
+        let p_str = target.to_string_lossy().to_string();
+
+        #[cfg(target_os = "windows")]
+        {
+            let win_path = p_str.replace('/', "\\");
+            std::process::Command::new("explorer")
+                .arg(&win_path)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(&p_str)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(&p_str)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn consume_launch_files(ctx: State<'_, AppContext>) -> Vec<String> {
+        ctx.take_launch_files()
+    }
+
+    #[tauri::command]
+    pub fn resolve_sample_track(ctx: State<'_, AppContext>) -> String {
+        ctx.resolve_sample_track_path()
+    }
+
+    #[tauri::command]
+    pub async fn download_model(
+        ctx: State<'_, AppContext>,
+        model_id: String,
+    ) -> Result<Vec<ModelInfo>, String> {
+        let ctx_clone = ctx.inner().clone();
+        tokio::task::spawn_blocking(move || {
+            ctx_clone
+                .download_model(&model_id)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("Download model task panicked: {}", e))?
     }
 }

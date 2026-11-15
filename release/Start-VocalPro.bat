@@ -75,7 +75,13 @@ if %ENGINE_READY% equ 0 (
     echo.
 )
 
-:: 3. Launch desktop executable
+:: 3. Launch desktop executable (forwarding any CLI / drag-and-drop media paths)
+where ffmpeg >nul 2>&1
+if !ERRORLEVEL! neq 0 (
+    if not exist "%~dp0ffmpeg.exe" if not exist "%ENGINE_DIR%\ffmpeg.exe" (
+        echo [Notice] FFmpeg was not found in PATH. Configure its path in Settings ^> FFmpeg Path for MP3/FLAC/video export.
+    )
+)
 echo [INFO] Launching VocalPro Desktop Application...
-start "" "%~dp0vocalpro.exe"
+start "" "%~dp0vocalpro.exe" %*
 exit /b 0

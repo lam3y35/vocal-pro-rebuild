@@ -28,9 +28,17 @@ def main() -> int:
     checks: list[dict] = []
 
     # 1. Verify Python Worker + Golden Null-Test + Hardware Optimizer + Parallel DSP (N1, N2, N3, N5, N7)
+    venv_candidates = [
+        ROOT_DIR / "worker" / ".venv" / "Scripts" / "pytest.exe",
+        ROOT_DIR / ".venv" / "Scripts" / "pytest.exe",
+        ROOT_DIR / "worker" / ".venv" / "bin" / "pytest",
+        ROOT_DIR / ".venv" / "bin" / "pytest",
+    ]
+    venv_pytest = next((p for p in venv_candidates if p.exists()), None)
+    pytest_cmd = [str(venv_pytest)] if venv_pytest else [sys.executable, "-m", "pytest"]
     ok_py, dt_py, out_py = run_step(
-        "Python Worker, Golden Null-Tests & Hardware Auto-Optimizer (pytest)",
-        ["/home/antigravity/.venv/bin/pytest", "worker/tests", "-v"],
+        "Python Worker, Golden Null-Tests & Hardware Optimizer (pytest)",
+        [*pytest_cmd, "worker/tests", "-v"],
     )
     checks.append(
         {

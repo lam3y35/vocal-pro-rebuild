@@ -58,6 +58,48 @@ pub struct AppDatabase {
     pub db_path: PathBuf,
 }
 
+pub fn validate_ffmpeg_path_setting(val: &Value) -> AppResult<()> {
+    let Some(raw) = val.as_str() else {
+        if val.is_null() {
+            return Ok(());
+        }
+        return Err(AppError::InvalidInput(
+            "ffmpeg_path must be a string path".to_string(),
+        ));
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    if trimmed.contains('\0')
+        || trimmed.contains('\n')
+        || trimmed.contains('\r')
+        || trimmed.contains('"')
+        || trimmed.contains('\'')
+    {
+        return Err(AppError::InvalidInput(
+            "Invalid characters in ffmpeg_path".to_string(),
+        ));
+    }
+    let path = Path::new(trimmed);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    let valid_ext = matches!(ext.as_deref(), None | Some("exe"));
+    if !file_name.contains("ffmpeg") || !valid_ext {
+        return Err(AppError::InvalidInput(
+            "ffmpeg_path must point to an ffmpeg binary (filename must contain 'ffmpeg' with no extension or .exe)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn default_config_map() -> serde_json::Map<String, Value> {
     let v = json!({
         // 1. General
@@ -67,7 +109,7 @@ pub fn default_config_map() -> serde_json::Map<String, Value> {
         "confirm_before_cancel": true,
         "completion_notification": true,
         "completion_sound": true,
-        "default_opening_screen": "separate",
+        "default_opening_screen": "home",
         "onboarding_completed": false,
 
         // 2. Output
@@ -82,8 +124,8 @@ pub fn default_config_map() -> serde_json::Map<String, Value> {
         "auto_open_folder": true,
         "preserve_source_metadata": true,
         "output_all_stems": false,
-        "output_video": true,
-        "video_output_mode": "video_only",
+        "output_video": false,
+        "video_output_mode": "audio_only",
         "delete_input_file": false,
         "ffmpeg_faststart": true,
         "include_sfx": true,
@@ -99,7 +141,7 @@ pub fn default_config_map() -> serde_json::Map<String, Value> {
         "shifts": 1,
         "ensemble_mode": false,
         "song_mode": false,
-        "trim_silence": true,
+        "trim_silence": false,
         "enable_vocal_gate": true,
         "enable_spectral_denoise": true,
         "gate_threshold_db": -55.0,
@@ -130,7 +172,7 @@ pub fn default_config_map() -> serde_json::Map<String, Value> {
         "max_threads": 0,
         "vram_cap_mb": 0,
         "ram_cap_mb": 0,
-        "fp16_inference": true,
+        "fp16_inference": false,
         "auto_oom_fallback": true,
         "safe_mode": false,
         "large_file_threshold_minutes": 15.0,
@@ -195,13 +237,15 @@ impl AppDatabase {
         let now = chrono::Utc::now().to_rfc3339();
         let defaults = default_config_map();
         let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
         for (k, v) in defaults {
             let val_str = serde_json::to_string(&v)?;
-            conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)",
                 params![k, val_str, now],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -230,19 +274,30 @@ impl AppDatabase {
                 map.insert(k, val);
             }
         }
+        if let Some(ffmpeg_val) = map.get("ffmpeg_path") {
+            crate::system::set_custom_ffmpeg_path(ffmpeg_val.as_str().unwrap_or(""));
+        }
         Ok(map)
     }
 
     pub fn update_settings(&self, updates: &HashMap<String, Value>) -> AppResult<()> {
+        if let Some(ffmpeg_val) = updates.get("ffmpeg_path") {
+            validate_ffmpeg_path_setting(ffmpeg_val)?;
+        }
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
         for (k, v) in updates {
             let v_str = serde_json::to_string(v)?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
                  ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
                 params![k, v_str, now],
             )?;
+        }
+        tx.commit()?;
+        if let Some(ffmpeg_val) = updates.get("ffmpeg_path") {
+            crate::system::set_custom_ffmpeg_path(ffmpeg_val.as_str().unwrap_or(""));
         }
         Ok(())
     }
@@ -261,6 +316,9 @@ impl AppDatabase {
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
             params![key, v_str, now],
         )?;
+        if key == "ffmpeg_path" {
+            crate::system::set_custom_ffmpeg_path(default_val.as_str().unwrap_or(""));
+        }
         Ok(default_val)
     }
 
@@ -269,15 +327,20 @@ impl AppDatabase {
         let defaults = default_config_map();
         {
             let conn = self.lock_conn();
-            conn.execute("DELETE FROM settings", [])?;
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM settings", [])?;
             for (k, v) in &defaults {
                 let v_str = serde_json::to_string(v)?;
-                conn.execute(
+                tx.execute(
                     "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)",
                     params![k, v_str, now],
                 )?;
             }
+            tx.commit()?;
         }
+        crate::system::set_custom_ffmpeg_path(
+            defaults.get("ffmpeg_path").and_then(|v| v.as_str()).unwrap_or(""),
+        );
         Ok(defaults.into_iter().collect())
     }
 
@@ -287,8 +350,13 @@ impl AppDatabase {
     }
 
     pub fn import_settings_json(&self, raw_json: &str) -> AppResult<HashMap<String, Value>> {
-        let parsed: HashMap<String, Value> = serde_json::from_str(raw_json)
+        let mut parsed: HashMap<String, Value> = serde_json::from_str(raw_json)
             .map_err(|e| AppError::InvalidInput(format!("Invalid settings JSON: {}", e)))?;
+        if let Some(Value::Object(opts)) = parsed.remove("options") {
+            for (k, v) in opts {
+                parsed.entry(k).or_insert(v);
+            }
+        }
         self.update_settings(&parsed)?;
         self.get_all_settings()
     }
@@ -302,15 +370,22 @@ impl AppDatabase {
             JobStatus::Failed => "failed",
             _ => "running",
         };
+        let finished_at: Option<String> = match rec.status {
+            JobStatus::Done | JobStatus::Cancelled | JobStatus::Failed => {
+                Some(chrono::Utc::now().to_rfc3339())
+            }
+            _ => None,
+        };
         let conn = self.lock_conn();
         conn.execute(
-            "INSERT INTO jobs (id, input_path, output_dir, model, output_mode, options_json, status, error_code, error_message, created_at, elapsed_s)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO jobs (id, input_path, output_dir, model, output_mode, options_json, status, error_code, error_message, created_at, finished_at, elapsed_s)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 output_dir = excluded.output_dir,
                 status = excluded.status,
                 error_code = excluded.error_code,
                 error_message = excluded.error_message,
+                finished_at = COALESCE(excluded.finished_at, jobs.finished_at),
                 elapsed_s = excluded.elapsed_s",
             params![
                 rec.job_id,
@@ -323,6 +398,7 @@ impl AppDatabase {
                 rec.error_code,
                 rec.error_message,
                 rec.created_at,
+                finished_at,
                 rec.elapsed_s
             ],
         )?;
@@ -516,7 +592,7 @@ impl AppDatabase {
         output_path: &str,
         format: &str,
         quality: &str,
-    ) -> AppResult<()> {
+    ) -> AppResult<DownloadHistoryEntry> {
         let id = uuid::Uuid::new_v4().to_string();
         let date = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let conn = self.lock_conn();
@@ -525,7 +601,15 @@ impl AppDatabase {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![id, title, url, output_path, format, quality, date],
         )?;
-        Ok(())
+        Ok(DownloadHistoryEntry {
+            id,
+            title: title.to_string(),
+            url: url.to_string(),
+            path: output_path.to_string(),
+            format: format.to_string(),
+            quality: quality.to_string(),
+            date,
+        })
     }
 
     pub fn list_download_history(&self) -> AppResult<Vec<DownloadHistoryEntry>> {

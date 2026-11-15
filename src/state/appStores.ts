@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   AnalysisResult,
+  AppScreen,
   ChangelogRelease,
   DEFAULT_JOB_OPTIONS,
   DownloadHistoryEntry,
@@ -14,6 +15,7 @@ import {
   PerformanceProfileMode,
   SeparationHistoryEntry,
   StemTrackInfo,
+  WaveformSummary,
   WorkerHealth,
 } from "../bindings";
 import { SupportedLocale } from "../i18n/translations";
@@ -71,6 +73,7 @@ interface JobsState {
   autoOpenFolder: boolean;
   queuePaused: boolean;
   previewWaveform: number[];
+  previewDurationSec: number;
   logs: string[];
   addFiles: (paths: string[]) => void;
   removeFile: (path: string) => void;
@@ -100,6 +103,24 @@ const SYNTH_WAVEFORM_8000 = Array.from({ length: 240 }, (_, i) => {
 
 const activeTimers = new Map<string, ReturnType<typeof setInterval>>();
 
+function formatSeparationError(err: unknown, fallbackPrefix: string): string {
+  const errStr = String((err as any)?.message || err);
+  const errLower = errStr.toLowerCase();
+  const isMissingModel =
+    errLower.includes("model_missing") ||
+    errLower.includes("model_corrupt") ||
+    ((errLower.includes("model") ||
+      errLower.includes("weight") ||
+      errLower.includes("checkpoint")) &&
+      (errLower.includes("not found") ||
+        errLower.includes("missing") ||
+        errLower.includes("corrupt") ||
+        errLower.includes("download")));
+  return isMissingModel
+    ? `AI model weights not found locally (${errStr}). Open Settings -> AI Model Registry to download weights or check %LOCALAPPDATA%\\VocalPro\\models.`
+    : `${fallbackPrefix}: ${errStr}`;
+}
+
 export const useJobsStore = create<JobsState>((set, get) => ({
   selectedFiles: [],
   activeJobId: null,
@@ -110,15 +131,26 @@ export const useJobsStore = create<JobsState>((set, get) => ({
   autoOpenFolder: true,
   queuePaused: false,
   previewWaveform: SYNTH_WAVEFORM_8000,
-  logs: [
-    "[ready] VocalPro Worker Pool v3.0.0 initialized over stdio JSON-Lines (0 listening TCP ports)",
-    "[info] Hardware Profile detected: Multi-process worker pool ready (memory-aware concurrency cap active)",
-    "[info] PyTorch 2.15.0 | Demucs 4.1.0 | Symphonia 0.5.5 | SQLite WAL ready",
-  ],
-  addFiles: (paths) =>
+  previewDurationSec: 0,
+  logs: [],
+  addFiles: (paths) => {
+    const cleanNew = paths.filter((p) => p && !get().selectedFiles.includes(p));
+    if (cleanNew.length === 0) return;
     set((s) => ({
-      selectedFiles: Array.from(new Set([...s.selectedFiles, ...paths])),
-    })),
+      selectedFiles: Array.from(new Set([...s.selectedFiles, ...cleanNew])),
+    }));
+    const targetPath = cleanNew[0];
+    if (targetPath && isTauriRuntime()) {
+      void invokeCommand<WaveformSummary>("fast_waveform", { audioPath: targetPath }).then((wf) => {
+        if (wf && Array.isArray(wf.peaks) && wf.peaks.length > 0) {
+          set({
+            previewWaveform: wf.peaks,
+            previewDurationSec: wf.duration_s || 0,
+          });
+        }
+      });
+    }
+  },
   removeFile: (path) =>
     set((s) => ({
       selectedFiles: s.selectedFiles.filter((p) => p !== path),
@@ -212,9 +244,9 @@ export const useJobsStore = create<JobsState>((set, get) => ({
         max_concurrent_workers: clamped,
         slots: Array.from({ length: clamped }, (_, i) => ({
           slot_id: i,
-          pid: 14820 + i * 4,
-          running: true,
-          active_job_id: null,
+          pid: sys.health.slots?.[i]?.pid ?? null,
+          running: sys.health.slots?.[i]?.running ?? false,
+          active_job_id: sys.health.slots?.[i]?.active_job_id ?? null,
         })),
       },
     }));
@@ -280,6 +312,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     get().appendLog(`[retry] Re-dispatching backend separation for ${targetFile}...`);
 
     let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let trackedJobId = jobId;
     try {
       const promise = invokeCommandStrict<JobRecord[]>("start_separation_batch", {
         inputs: [targetFile],
@@ -292,11 +325,37 @@ export const useJobsStore = create<JobsState>((set, get) => ({
           const liveJobs = await invokeCommand<JobRecord[]>("list_jobs");
           if (liveJobs && Array.isArray(liveJobs) && liveJobs.length > 0) {
             set((s) => {
-              const live = liveJobs.find((lj) => lj.input_path === targetFile);
+              const live =
+                liveJobs.find((lj) => lj.job_id === trackedJobId) ||
+                liveJobs.find(
+                  (lj) =>
+                    lj.input_path === targetFile &&
+                    (lj.status !== "done" && lj.status !== "cancelled" && lj.status !== "failed")
+                );
               if (!live) return s;
+              const prevId = trackedJobId;
+              trackedJobId = live.job_id;
+              const currentLocal = s.jobs.find((j) => j.job_id === prevId);
+              const wasCancelledLocally = currentLocal?.status === "cancelled";
+              if (wasCancelledLocally) {
+                void invokeCommand("cancel_separation_job", { jobId: live.job_id });
+              }
               return {
+                activeJobId: s.activeJobId === prevId ? live.job_id : s.activeJobId,
                 jobs: s.jobs.map((j) =>
-                  j.job_id === jobId ? { ...j, ...live, job_id: jobId } : j
+                  j.job_id === prevId
+                    ? {
+                        ...j,
+                        ...live,
+                        job_id: live.job_id,
+                        status: wasCancelledLocally ? "cancelled" : live.status,
+                        phase: wasCancelledLocally ? "cancelled" : live.phase,
+                        eta_s: wasCancelledLocally ? null : live.eta_s,
+                        message: wasCancelledLocally
+                          ? "Cancelled cooperatively (< 500 ms)"
+                          : live.message,
+                      }
+                    : j
                 ),
               };
             });
@@ -307,26 +366,43 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       }, 400);
 
       const records = await promise;
-      if (pollTimer) clearInterval(pollTimer);
-
       const rec = records && Array.isArray(records) ? records[0] : null;
-      if (!rec || (rec as any).status === "failed" || !rec.stems || rec.stems.length === 0) {
-        const errMsg = (rec as any)?.error_message || "Separation worker failed to generate stems on retry.";
+      if (!rec || rec.status === "failed" || rec.status === "cancelled" || !rec.stems || rec.stems.length === 0) {
+        const finalStatus = rec?.status === "cancelled" ? "cancelled" : "failed";
+        const errMsg =
+          rec?.error_message ||
+          (finalStatus === "cancelled"
+            ? "Job cancelled."
+            : "Separation worker failed to generate stems on retry.");
         set((s) => ({
           jobs: s.jobs.map((j) =>
-            j.job_id === jobId ? { ...j, status: "failed", error_message: errMsg } : j
+            j.job_id === trackedJobId
+              ? { ...j, status: finalStatus, error_message: finalStatus === "failed" ? errMsg : null }
+              : j
           ),
         }));
-        useSystemStore.getState().showBanner(`Retry failed: ${errMsg}`, "error");
-        get().appendLog(`[retry_error] Retry failed for ${targetFile}: ${errMsg}`);
+        if (finalStatus === "failed") {
+          useSystemStore.getState().showBanner(`Retry failed: ${errMsg}`, "error");
+          get().appendLog(`[retry_error] Retry failed for ${targetFile}: ${errMsg}`);
+        }
         return;
       }
 
+      const resolvedJobId = rec.job_id || trackedJobId;
+      const curJob = get().jobs.find(
+        (j) => j.job_id === trackedJobId || j.job_id === resolvedJobId
+      );
+      if (curJob?.status === "cancelled") {
+        void invokeCommand("cancel_separation_job", { jobId: resolvedJobId });
+        return;
+      }
       set((s) => ({
+        activeJobId: s.activeJobId === trackedJobId ? resolvedJobId : s.activeJobId,
         jobs: s.jobs.map((j) =>
-          j.job_id === jobId ? { ...j, ...rec, job_id: jobId, status: "done", percent: 100 } : j
+          j.job_id === trackedJobId ? { ...j, ...rec, job_id: resolvedJobId, status: "done", percent: 100 } : j
         ),
       }));
+      trackedJobId = resolvedJobId;
 
       const fname = targetFile.split(/[\\/]/).pop() || "track";
       useSystemStore.getState().showBanner(`Successfully separated "${fname}" into ${rec.stems.length} stems!`, "success");
@@ -347,22 +423,16 @@ export const useJobsStore = create<JobsState>((set, get) => ({
         void invokeCommand("open_folder", { path: rec.output_dir });
       }
     } catch (err: any) {
-      if (pollTimer) clearInterval(pollTimer);
-      const errStr = String(err?.message || err);
-      const isMissingModel =
-        errStr.toLowerCase().includes("model") ||
-        errStr.toLowerCase().includes("weight") ||
-        errStr.toLowerCase().includes("not found");
-      const userMessage = isMissingModel
-        ? "AI model not found locally. Run setup.bat once or check {localappdata}\\VocalPro\\models."
-        : `Retry error: ${errStr}`;
+      const userMessage = formatSeparationError(err, "Retry error");
       set((s) => ({
         jobs: s.jobs.map((j) =>
-          j.job_id === jobId ? { ...j, status: "failed", error_message: userMessage } : j
+          j.job_id === trackedJobId ? { ...j, status: "failed", error_message: userMessage } : j
         ),
       }));
       useSystemStore.getState().showBanner(userMessage, "error");
       get().appendLog(`[retry_error] ${userMessage}`);
+    } finally {
+      if (pollTimer) clearInterval(pollTimer);
     }
   },
   clearCompletedJobs: () => {
@@ -460,6 +530,8 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       `[batch:start] Dispatched batch of ${selectedFiles.length} file(s) -> model=${options.model}, format=${options.output_format}`
     );
 
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let initialSyncTimer: ReturnType<typeof setTimeout> | null = null;
     try {
       // 1. Submit batch to real Rust backend
       const promise = invokeCommandStrict<JobRecord[]>("start_separation_batch", {
@@ -468,27 +540,68 @@ export const useJobsStore = create<JobsState>((set, get) => ({
         options,
       });
 
-      // 2. Poll real job records from Rust supervisor
-      const pollTimer = setInterval(async () => {
+      // 2. Poll real job records from Rust supervisor (with immediate 40ms initial reconcile)
+      const syncLiveJobs = async () => {
         try {
           const liveJobs = await invokeCommand<JobRecord[]>("list_jobs");
           if (liveJobs && Array.isArray(liveJobs) && liveJobs.length > 0) {
             set((s) => {
-              const liveMap = new Map(liveJobs.map((j) => [j.job_id, j]));
+              const liveById = new Map(liveJobs.map((j) => [j.job_id, j]));
+              const claimed = new Set(s.jobs.map((j) => j.job_id).filter((id) => liveById.has(id)));
+              let nextActiveJobId = s.activeJobId;
               const updated = s.jobs.map((j) => {
-                const live = liveMap.get(j.job_id);
-                return live ? { ...j, ...live } : j;
+                let live = liveById.get(j.job_id);
+                if (!live && j.job_id.startsWith("job-")) {
+                  live = liveJobs.find(
+                    (lj) =>
+                      lj.input_path === j.input_path &&
+                      !claimed.has(lj.job_id) &&
+                      (lj.status !== "done" && lj.status !== "cancelled" && lj.status !== "failed")
+                  );
+                }
+                if (live) {
+                  claimed.add(live.job_id);
+                  if (nextActiveJobId === j.job_id) {
+                    nextActiveJobId = live.job_id;
+                  }
+                  if (j.status === "cancelled" && live.status !== "cancelled") {
+                    void invokeCommand("cancel_separation_job", { jobId: live.job_id });
+                    return {
+                      ...j,
+                      ...live,
+                      status: "cancelled" as const,
+                      phase: "cancelled",
+                      eta_s: null,
+                      message: j.message,
+                    };
+                  }
+                  if (j.priority !== "normal" && live.priority !== j.priority) {
+                    void invokeCommand("set_job_priority", {
+                      jobId: live.job_id,
+                      priority: j.priority,
+                    });
+                    return { ...j, ...live, priority: j.priority };
+                  }
+                  return { ...j, ...live };
+                }
+                return j;
               });
-              return { jobs: updated };
+              return { jobs: updated, activeJobId: nextActiveJobId };
             });
           }
         } catch {
           // ignore
         }
+      };
+
+      initialSyncTimer = setTimeout(() => {
+        void syncLiveJobs();
+      }, 40);
+      pollTimer = setInterval(() => {
+        void syncLiveJobs();
       }, 400);
 
       const records = await promise;
-      clearInterval(pollTimer);
 
       if (!records || !Array.isArray(records) || records.length === 0) {
         set((s) => ({
@@ -498,8 +611,8 @@ export const useJobsStore = create<JobsState>((set, get) => ({
                   ...j,
                   status: "failed",
                   error_message: !isTauriRuntime()
-                    ? "Running in web browser preview. For real AI stem separation, launch the native desktop app via run.bat."
-                    : "Separation worker did not produce stem files. Please run setup.bat to verify the PyTorch AI engine.",
+                    ? "Running in web browser preview. Launch the native VocalPro desktop application for AI stem separation."
+                    : "Separation worker did not produce stem files. Open Settings -> Model Manager to verify the AI engine weights.",
                 }
               : j
           ),
@@ -508,59 +621,90 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       }
 
       set((s) => {
-        const recMap = new Map(records.map((r) => [r.input_path, r]));
+        const newJobIds = new Set(newJobs.map((nj) => nj.job_id));
+        const recById = new Map(records.map((r) => [r.job_id, r]));
+        const claimedRecIds = new Set(
+          s.jobs.map((j) => j.job_id).filter((id) => recById.has(id))
+        );
+        let nextActiveJobId = s.activeJobId;
         return {
           jobs: s.jobs.map((j) => {
-            const realRec = recMap.get(j.input_path);
-            return realRec ? { ...j, ...realRec, status: "done", percent: 100 } : j;
+            let realRec = recById.get(j.job_id);
+            if (!realRec && newJobIds.has(j.job_id)) {
+              realRec = records.find(
+                (r) => r.input_path === j.input_path && !claimedRecIds.has(r.job_id)
+              );
+            }
+            if (!realRec) return j;
+            claimedRecIds.add(realRec.job_id);
+            if (nextActiveJobId === j.job_id) {
+              nextActiveJobId = realRec.job_id;
+            }
+            const wasClientCancelled = j.status === "cancelled";
+            const nextStatus = wasClientCancelled
+              ? ("cancelled" as const)
+              : realRec.status === "failed" || realRec.status === "cancelled"
+              ? realRec.status
+              : !realRec.stems || realRec.stems.length === 0
+              ? ("failed" as const)
+              : ("done" as const);
+            if (wasClientCancelled && realRec.status !== "cancelled") {
+              void invokeCommand("cancel_separation_job", { jobId: realRec.job_id });
+            }
+            const nextPercent = nextStatus === "done" ? 100 : realRec.percent ?? j.percent;
+            return {
+              ...j,
+              ...realRec,
+              status: nextStatus,
+              phase: wasClientCancelled ? "cancelled" : realRec.phase,
+              eta_s: wasClientCancelled ? null : realRec.eta_s,
+              message: wasClientCancelled ? j.message : realRec.message,
+              percent: nextPercent,
+            };
           }),
+          activeJobId: nextActiveJobId,
         };
       });
 
-        // Refresh outputs & history directly from SQLite
-        const [outs, hists] = await Promise.all([
-          invokeCommand<OutputFolderEntry[]>("list_outputs"),
-          invokeCommand<SeparationHistoryEntry[]>("list_separation_history"),
-        ]);
+      // Refresh outputs & history directly from SQLite
+      const [outs, hists] = await Promise.all([
+        invokeCommand<OutputFolderEntry[]>("list_outputs"),
+        invokeCommand<SeparationHistoryEntry[]>("list_separation_history"),
+      ]);
 
-        if (outs && Array.isArray(outs) && outs.length > 0) {
-          useLibraryStore.setState({ outputs: outs });
-          const firstOut = outs[0];
-          if (firstOut) {
-            useMixerStore.getState().loadFolderStems(firstOut);
+      if (outs && Array.isArray(outs) && outs.length > 0) {
+        useLibraryStore.setState({ outputs: outs });
+        const firstOut = outs[0];
+        if (firstOut) {
+          useMixerStore.getState().loadFolderStems(firstOut);
+        }
+      }
+
+      if (hists && Array.isArray(hists) && hists.length > 0) {
+        useLibraryStore.setState({ separationHistory: hists });
+      }
+
+      for (const rec of records) {
+        if (rec.status === "cancelled") {
+          appendLog(`[job_cancelled] Cancelled ${rec.input_path}`);
+        } else if (!rec.stems || rec.stems.length === 0 || rec.status === "failed") {
+          const fname = rec.input_path.split(/[\\/]/).pop() || "track";
+          useSystemStore.getState().showBanner(
+            `Warning: ${fname} failed: ${rec.error_message || "no stems generated"}`,
+            "warning"
+          );
+        } else {
+          appendLog(
+            `[job_done] Completed ${rec.input_path} -> ${rec.stems.length} stems written to ${rec.output_dir}`
+          );
+          if (get().autoOpenFolder && rec.output_dir) {
+            void invokeCommand("open_folder", { path: rec.output_dir });
           }
         }
-
-        if (hists && Array.isArray(hists) && hists.length > 0) {
-          useLibraryStore.setState({ separationHistory: hists });
-        }
-
-        for (const rec of records) {
-          if (!rec.stems || rec.stems.length === 0 || (rec as any).status === "failed") {
-            const fname = rec.input_path.split(/[\\/]/).pop() || "track";
-            useSystemStore.getState().showBanner(
-              `Warning: ${fname} failed: ${(rec as any).error_message || "no stems generated"}`,
-              "warning"
-            );
-          } else {
-            appendLog(
-              `[job_done] Completed ${rec.input_path} -> ${rec.stems.length} stems written to ${rec.output_dir}`
-            );
-            if (get().autoOpenFolder && rec.output_dir) {
-              void invokeCommand("open_folder", { path: rec.output_dir });
-            }
-          }
-        }
+      }
     } catch (err: any) {
-      const errStr = String(err?.message || err);
-      appendLog(`[batch_error] Failed separation batch: ${errStr}`);
-      const isMissingModel =
-        errStr.toLowerCase().includes("model") ||
-        errStr.toLowerCase().includes("weight") ||
-        errStr.toLowerCase().includes("not found");
-      const userMessage = isMissingModel
-        ? "AI model not found locally. Run setup.bat once or check {localappdata}\\VocalPro\\models."
-        : `Separation error: ${errStr}`;
+      const userMessage = formatSeparationError(err, "Separation error");
+      appendLog(`[batch_error] Failed separation batch: ${userMessage}`);
       useSystemStore.getState().showBanner(userMessage, "error");
       set((s) => ({
         jobs: s.jobs.map((j) =>
@@ -569,6 +713,9 @@ export const useJobsStore = create<JobsState>((set, get) => ({
             : j
         ),
       }));
+    } finally {
+      if (initialSyncTimer) clearTimeout(initialSyncTimer);
+      if (pollTimer) clearInterval(pollTimer);
     }
   },
 
@@ -592,7 +739,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
           : j
       ),
     }));
-    get().appendLog(`[job_cancelled] ${jobId} aborted within 63 µs at segment boundary`);
+    get().appendLog(`[job_cancelled] Requested cooperative cancellation for ${jobId}`);
   },
 }));
 
@@ -604,18 +751,20 @@ interface MixerState {
   playing: boolean;
   playheadSec: number;
   durationSec: number;
-  exportFormat: "wav" | "flac" | "mp3";
+  exportFormat: "wav" | "flac" | "mp3" | "ogg" | "aac";
   exportBitrate: "128k" | "192k" | "256k" | "320k";
   stems: StemTrackInfo[];
   lastExportMessage: string | null;
-  loadFolderStems: (entry: OutputFolderEntry) => void;
+  loadFolderStems: (entry: OutputFolderEntry, skipBackendLoad?: boolean) => void;
   setStemGain: (name: string, gain: number) => void;
+  setStemPan: (name: string, pan: number) => void;
   toggleMute: (name: string) => void;
   toggleSolo: (name: string) => void;
+  applyQuickMixMode: (mode: "full" | "vocals_only" | "instrumental") => void;
   resetStems: () => void;
   togglePlay: () => void;
   seek: (sec: number) => void;
-  setExportFormat: (fmt: "wav" | "flac" | "mp3") => void;
+  setExportFormat: (fmt: "wav" | "flac" | "mp3" | "ogg" | "aac") => void;
   setExportBitrate: (br: "128k" | "192k" | "256k" | "320k") => void;
   exportMix: () => void;
   exportSeparateStems: () => void;
@@ -624,7 +773,8 @@ interface MixerState {
 
 audioEngine.setCallbacks(
   (playheadSec) => useMixerStore.setState({ playheadSec }),
-  (playing) => useMixerStore.setState({ playing })
+  (playing) => useMixerStore.setState({ playing }),
+  (durationSec) => useMixerStore.setState({ durationSec })
 );
 
 export const useMixerStore = create<MixerState>((set, get) => ({
@@ -636,7 +786,7 @@ export const useMixerStore = create<MixerState>((set, get) => ({
   exportBitrate: "320k",
   lastExportMessage: null,
   stems: [],
-  loadFolderStems: (entry) => {
+  loadFolderStems: (entry, skipBackendLoad = false) => {
     audioEngine.stop();
 
     const AUDIO_STEM_EXTS = [".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".aif", ".aiff"];
@@ -658,6 +808,7 @@ export const useMixerStore = create<MixerState>((set, get) => ({
       name: s.name,
       path: s.path,
       gain: 1.0,
+      pan: 0,
       mute: false,
       solo: false,
       duration_s: s.duration_s,
@@ -665,15 +816,19 @@ export const useMixerStore = create<MixerState>((set, get) => ({
 
     audioEngine.loadStems(newStems, toAssetUrl);
 
+    const maxStemDur = newStems.reduce((acc, s) => Math.max(acc, s.duration_s || 0), 0);
+
     set({
       activeFolder: entry.folder_path,
-      durationSec: entry.duration_s || 180,
+      durationSec: entry.duration_s || maxStemDur || 0,
       playheadSec: 0,
       playing: false,
       stems: newStems,
     });
 
-    void invokeCommand("mixer_load_folder", { folderPath: entry.folder_path });
+    if (!skipBackendLoad) {
+      void invokeCommand("mixer_load_folder", { folderPath: entry.folder_path });
+    }
   },
   setStemGain: (name, gain) => {
     const clamped = Math.max(0, Math.min(2, gain));
@@ -681,6 +836,14 @@ export const useMixerStore = create<MixerState>((set, get) => ({
     void invokeCommand("mixer_set_gain", { stemName: name, gain: clamped });
     set((s) => ({
       stems: s.stems.map((st) => (st.name === name ? { ...st, gain: clamped } : st)),
+    }));
+  },
+  setStemPan: (name, pan) => {
+    const clamped = Math.max(-1, Math.min(1, pan));
+    audioEngine.setStemPan(name, clamped);
+    void invokeCommand("mixer_set_pan", { stemName: name, pan: clamped });
+    set((s) => ({
+      stems: s.stems.map((st) => (st.name === name ? { ...st, pan: clamped } : st)),
     }));
   },
   toggleMute: (name) =>
@@ -709,16 +872,32 @@ export const useMixerStore = create<MixerState>((set, get) => ({
       });
       return { stems: nextStems };
     }),
+  applyQuickMixMode: (mode) =>
+    set((s) => {
+      const nextStems = s.stems.map((st) => {
+        const isVocal = st.name.toLowerCase().includes("vocal");
+        const mute =
+          mode === "full" ? false : mode === "vocals_only" ? !isVocal : isVocal;
+        audioEngine.setStemMute(st.name, mute);
+        audioEngine.setStemSolo(st.name, false);
+        void invokeCommand("mixer_set_mute", { stemName: st.name, mute });
+        void invokeCommand("mixer_set_solo", { stemName: st.name, solo: false });
+        return { ...st, mute, solo: false };
+      });
+      return { stems: nextStems };
+    }),
   resetStems: () =>
     set((s) => {
       const nextStems = s.stems.map((st) => {
         audioEngine.setStemGain(st.name, 1.0);
+        audioEngine.setStemPan(st.name, 0);
         audioEngine.setStemMute(st.name, false);
         audioEngine.setStemSolo(st.name, false);
         void invokeCommand("mixer_set_gain", { stemName: st.name, gain: 1.0 });
+        void invokeCommand("mixer_set_pan", { stemName: st.name, pan: 0 });
         void invokeCommand("mixer_set_mute", { stemName: st.name, mute: false });
         void invokeCommand("mixer_set_solo", { stemName: st.name, solo: false });
-        return { ...st, gain: 1.0, mute: false, solo: false };
+        return { ...st, gain: 1.0, pan: 0, mute: false, solo: false };
       });
       return { stems: nextStems };
     }),
@@ -730,22 +909,24 @@ export const useMixerStore = create<MixerState>((set, get) => ({
   seek: (sec) => {
     const clamped = Math.max(0, Math.min(get().durationSec, sec));
     audioEngine.seek(clamped);
-    void invokeCommand("mixer_seek", { frame: Math.round(clamped * 44100) });
+    void invokeCommand("mixer_seek", { positionSec: clamped });
   },
   setExportFormat: (fmt) => set({ exportFormat: fmt }),
   setExportBitrate: (br) => set({ exportBitrate: br }),
   exportMix: async () => {
-    const { activeFolder, exportFormat, exportBitrate } = get();
+    const { activeFolder, exportFormat, exportBitrate, stems } = get();
     if (!activeFolder) {
       set({ lastExportMessage: "No output folder selected to export mix." });
       return;
     }
     const out = `${activeFolder}/stem_mix.${exportFormat}`;
     try {
+      const pans = Object.fromEntries(stems.map((s) => [s.name, s.pan ?? 0]));
       const res = await invokeCommandStrict<string>("mixer_export_mix", {
         outputPath: out,
         format: exportFormat,
         bitrate: exportBitrate,
+        pans,
       });
       set({
         lastExportMessage: `Exported Mixed Track -> ${res || out} (${exportFormat.toUpperCase()} @ ${exportBitrate})`,
@@ -808,7 +989,7 @@ interface LibraryState {
   presets: { name: string; options: JobOptions }[];
   selectOutput: (id: string) => void;
   openFolderInMixer: (folderPath: string, sourceName?: string, model?: string) => Promise<void>;
-  addCompletedOutput: (entry: OutputFolderEntry) => void;
+  addCompletedOutput: (entry: OutputFolderEntry, skipBackendLoad?: boolean) => void;
   runAnalysisForFolder: (folderPath: string) => void;
   addSeparationHistory: (entry: SeparationHistoryEntry) => void;
   clearSeparationHistory: () => void;
@@ -910,13 +1091,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
           duration_s: snap.total_frames / (snap.sample_rate || 44100),
           created_at: new Date().toISOString(),
         };
-        get().addCompletedOutput(entry);
+        get().addCompletedOutput(entry, true);
       }
     } catch (e) {
       console.warn("Failed to load folder into mixer:", e);
     }
   },
-  addCompletedOutput: (entry) => {
+  addCompletedOutput: (entry, skipBackendLoad = false) => {
     set((s) => {
       const exists = s.outputs.some((o) => o.id === entry.id || o.folder_path === entry.folder_path);
       const newOutputs = exists
@@ -927,7 +1108,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         selectedOutputId: entry.id,
       };
     });
-    useMixerStore.getState().loadFolderStems(entry);
+    useMixerStore.getState().loadFolderStems(entry, skipBackendLoad);
   },
   runAnalysisForFolder: async (folderPath) => {
     const res = await invokeCommand<AnalysisResult>("analyze_audio_file", { inputPath: folderPath });
@@ -974,20 +1155,25 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     void invokeCommand("clear_download_history");
     set({ downloadHistory: [] });
   },
-  savePreset: (name, options) =>
+  savePreset: (name, options) => {
+    void invokeCommand("save_preset", { name, config: options });
     set((s) => ({
       presets: [...s.presets.filter((p) => p.name !== name), { name, options: { ...options } }],
-    })),
-  deletePreset: (name) =>
+    }));
+  },
+  deletePreset: (name) => {
+    void invokeCommand("delete_preset", { name });
     set((s) => ({
       presets: s.presets.filter((p) => p.name !== name),
-    })),
+    }));
+  },
 }));
 
 // ---------------------------------------------------------------------------
 // 4. System & Settings Store (8 Sections, Theme, Scale, Accessibility, Onboarding)
 // ---------------------------------------------------------------------------
 interface SystemState {
+  activeScreen: AppScreen;
   locale: SupportedLocale;
   theme: "dark" | "light" | "system";
   uiScale: 90 | 100 | 110 | 125;
@@ -1015,9 +1201,11 @@ interface SystemState {
   health: WorkerHealth;
   hardwareProfile: HardwareProfile;
   models: ModelInfo[];
+  downloadingModelId: string | null;
   changelog: ChangelogRelease[];
   showChangelogModal: boolean;
   systemBanner: BannerInfo | null;
+  setActiveScreen: (screen: AppScreen) => void;
   setLocale: (loc: SupportedLocale) => void;
   setTheme: (theme: "dark" | "light" | "system") => void;
   setUiScale: (scale: 90 | 100 | 110 | 125) => void;
@@ -1039,17 +1227,19 @@ interface SystemState {
   resetAllSettings: () => void;
   exportSettingsJson: () => string;
   importSettingsJson: (rawJson: string) => void;
-  registerFileAssociations: () => void;
-  createDesktopShortcut: () => void;
+  registerFileAssociations: () => Promise<void>;
+  createDesktopShortcut: () => Promise<void>;
   restartWorker: () => Promise<void>;
-  exportDiagnosticBundle: () => void;
+  exportDiagnosticBundle: () => Promise<void>;
   setShowChangelogModal: (v: boolean) => void;
   autoOptimizeForHardware: () => void;
+  downloadModel: (modelId: string) => Promise<void>;
   showBanner: (msg: string, type?: BannerType) => void;
   initApp: () => Promise<void>;
 }
 
 export const useSystemStore = create<SystemState>((set, get) => ({
+  activeScreen: "home",
   locale: "en",
   theme: "dark",
   uiScale: 100,
@@ -1067,13 +1257,10 @@ export const useSystemStore = create<SystemState>((set, get) => ({
   maxCacheSizeGb: 10.0,
   activeProfileMode: "Max Quality",
   calibrating: false,
-  lastCalibrationResult: {
-    elapsed_ms: 82.4,
-    throughput_x_realtime: 48.5,
-    hardware_fingerprint: "9f41c8a20b17e3d4",
-  },
-  fileAssociationsRegistered: true,
-  desktopShortcutCreated: true,
+  lastCalibrationResult: null,
+  fileAssociationsRegistered: false,
+  desktopShortcutCreated: false,
+  downloadingModelId: null,
   showChangelogModal: false,
   systemBanner: null,
   showBanner: (msg, type) => set({ systemBanner: makeBanner(msg, type) }),
@@ -1100,6 +1287,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
     available_ram_mb: 4096,
     disk_free_gb: 50.0,
     temp_drive_speed_mb_s: 500.0,
+    temp_drive_speed_mbps: 500.0,
     on_battery: false,
     power_source: "ac",
     cuda_available: false,
@@ -1141,7 +1329,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       description: "Bag of 4 specialist fine-tuned models (~4x compute, highest vocal SDR).",
       stems: ["vocals", "drums", "bass", "other"],
       relative_compute: 4.0,
-      cached: true,
+      cached: false,
     },
     {
       id: "htdemucs_6s",
@@ -1149,7 +1337,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       description: "Separates vocals, drums, bass, guitar, piano, and other.",
       stems: ["vocals", "drums", "bass", "guitar", "piano", "other"],
       relative_compute: 1.2,
-      cached: true,
+      cached: false,
     },
     {
       id: "hdemucs_mmi",
@@ -1157,7 +1345,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       description: "Hybrid Demucs v3 trained on MUSDB + extra MMI dataset.",
       stems: ["vocals", "drums", "bass", "other"],
       relative_compute: 1.0,
-      cached: true,
+      cached: false,
     },
     {
       id: "mdx",
@@ -1173,7 +1361,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       description: "MDX-Net trained with extra data (used in Ensemble Mode).",
       stems: ["vocals", "drums", "bass", "other"],
       relative_compute: 2.0,
-      cached: true,
+      cached: false,
     },
     {
       id: "mdx_q",
@@ -1200,12 +1388,13 @@ export const useSystemStore = create<SystemState>((set, get) => ({
         "Native Rust + Tauri v2 + React 19 architecture with zero localhost HTTP/WebSocket ports (fixes WinError 10055)",
         "Multi-process parallel worker pool (1-4 concurrent processes) & hardware auto-optimization",
         "Real per-segment Demucs progress and < 500 ms cooperative job cancellation",
-        "Real-time lock-free Rust streaming stem mixer (< 15 ms fader latency, ~30 MB resident RAM for 6x5min stems)",
+        "Real-time lock-free Rust streaming stem mixer (15 ms smoothed fader gain & pan, ~30 MB resident RAM for 6x5min stems)",
         "All 6 stems saved for htdemucs_6s and output_all_stems (fixes P-07)",
         "SQLite WAL database with automatic v1/v2 config and history migration",
       ],
     },
   ],
+  setActiveScreen: (activeScreen) => set({ activeScreen }),
   setLocale: (loc) => {
     set({ locale: loc });
     void invokeCommand("update_settings", { patch: { locale: loc } });
@@ -1228,16 +1417,26 @@ export const useSystemStore = create<SystemState>((set, get) => ({
   },
   setAlwaysOnTop: (v) => {
     set({ alwaysOnTop: v, systemBanner: makeBanner(`Window Always-on-Top: ${v ? "Enabled" : "Disabled"}`, "info") });
+    if (isTauriRuntime()) {
+      void import("@tauri-apps/api/window")
+        .then(({ getCurrentWindow }) => getCurrentWindow().setAlwaysOnTop(v))
+        .catch(() => {});
+    }
     void invokeCommand("update_settings", { patch: { always_on_top: v } });
   },
   setMinimizeToTray: (v) => {
-    set({ minimizeToTray: v, systemBanner: makeBanner(`Minimize to System Tray: ${v ? "Enabled" : "Disabled"}`, "info") });
+    set({
+      minimizeToTray: v,
+      systemBanner: makeBanner(`Background Queue Persistence: ${v ? "Enabled" : "Disabled"}`, "info"),
+    });
     void invokeCommand("update_settings", { patch: { minimize_to_tray: v } });
   },
   setShowOnboardingModal: (v) => set({ showOnboardingModal: v }),
   completeOnboarding: () => {
     set({ onboardingDone: true, showOnboardingModal: false });
-    void invokeCommand("update_settings", { patch: { onboarding_done: true } });
+    void invokeCommand("update_settings", {
+      patch: { onboarding_done: true, onboarding_completed: true },
+    });
   },
   setSettingsSearchQuery: (q) => set({ settingsSearchQuery: q }),
   setSettingsViewMode: (m) => set({ settingsViewMode: m }),
@@ -1262,7 +1461,8 @@ export const useSystemStore = create<SystemState>((set, get) => ({
     void invokeCommand("update_settings", { patch: { max_cache_size_gb: gb } });
   },
   setPerformanceProfileMode: (mode) => {
-    void invokeCommand("auto_optimize_for_hardware", { profileMode: mode });
+    const backendMode = mode === "Max Quality" ? "max_quality" : mode.toLowerCase();
+    void invokeCommand("auto_optimize_for_hardware", { profileMode: backendMode });
     const hw = get().hardwareProfile;
     let shifts = 1;
     let overlap = 0.25;
@@ -1303,21 +1503,108 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       fp16_inference: false,
     });
   },
-  calibrateHardware: () => {
-    set({ calibrating: true, systemBanner: makeBanner("Running <= 30s hardware micro-calibration benchmark...", "info") });
-    void invokeCommand("calibrate_hardware");
-    setTimeout(() => {
-      const res = {
-        elapsed_ms: 78.6,
-        throughput_x_realtime: 50.9,
-        hardware_fingerprint: get().hardwareProfile.hardware_fingerprint || "9f41c8a20b17e3d4",
-      };
-      set({
-        calibrating: false,
-        lastCalibrationResult: res,
-        systemBanner: makeBanner(`Hardware Calibration Complete in ${res.elapsed_ms} ms (${res.throughput_x_realtime}x real-time, fingerprint=${res.hardware_fingerprint})`, "success"),
-      });
-    }, 120);
+  calibrateHardware: async () => {
+    set({
+      calibrating: true,
+      systemBanner: makeBanner("Running <= 30s hardware micro-calibration benchmark...", "info"),
+    });
+    try {
+      const realRes = await invokeCommandStrict<{
+        elapsed_ms?: number;
+        inference_elapsed_s?: number;
+        throughput_x_realtime?: number;
+        realtime_factor?: number;
+        recommended_shifts?: number;
+        recommended_segment_s?: number;
+        calibrated_max_concurrent_jobs?: number;
+        hardware_fingerprint?: string;
+      }>("calibrate_hardware");
+      const elapsedMs =
+        typeof realRes?.elapsed_ms === "number"
+          ? realRes.elapsed_ms
+          : typeof realRes?.inference_elapsed_s === "number"
+            ? realRes.inference_elapsed_s * 1000
+            : null;
+      const throughput =
+        typeof realRes?.throughput_x_realtime === "number"
+          ? realRes.throughput_x_realtime
+          : typeof realRes?.realtime_factor === "number"
+            ? realRes.realtime_factor
+            : null;
+
+      if (elapsedMs !== null && throughput !== null) {
+        const fp =
+          realRes?.hardware_fingerprint ||
+          get().hardwareProfile.hardware_fingerprint ||
+          "local-hw";
+        const res = {
+          elapsed_ms: Number(elapsedMs.toFixed(1)),
+          throughput_x_realtime: Number(throughput.toFixed(1)),
+          hardware_fingerprint: fp,
+        };
+        if (typeof realRes?.calibrated_max_concurrent_jobs === "number") {
+          useJobsStore.getState().setParallelWorkers(realRes.calibrated_max_concurrent_jobs);
+        }
+        if (
+          typeof realRes?.recommended_shifts === "number" ||
+          typeof realRes?.recommended_segment_s === "number"
+        ) {
+          useJobsStore.getState().setOptions({
+            ...(typeof realRes.recommended_shifts === "number"
+              ? { shifts: realRes.recommended_shifts }
+              : {}),
+            ...(typeof realRes.recommended_segment_s === "number"
+              ? { segment: realRes.recommended_segment_s }
+              : {}),
+          });
+        }
+        set({
+          calibrating: false,
+          lastCalibrationResult: res,
+          systemBanner: makeBanner(
+            `Hardware Calibration Complete in ${res.elapsed_ms} ms (${res.throughput_x_realtime}x real-time, fingerprint=${res.hardware_fingerprint})`,
+            "success"
+          ),
+        });
+        return;
+      }
+      if (isTauriRuntime()) {
+        set({
+          calibrating: false,
+          systemBanner: makeBanner(
+            "Hardware calibration returned incomplete telemetry. Inspect Settings -> Diagnostics or restart worker.",
+            "error"
+          ),
+        });
+        return;
+      }
+    } catch (err: any) {
+      console.warn("calibrate_hardware error:", err);
+      if (isTauriRuntime()) {
+        set({
+          calibrating: false,
+          systemBanner: makeBanner(
+            `Hardware calibration failed: ${String(err?.message || err)}`,
+            "error"
+          ),
+        });
+        return;
+      }
+    }
+    const fp = get().hardwareProfile.hardware_fingerprint || "web-preview";
+    const res = {
+      elapsed_ms: 82.4,
+      throughput_x_realtime: 48.5,
+      hardware_fingerprint: fp,
+    };
+    set({
+      calibrating: false,
+      lastCalibrationResult: res,
+      systemBanner: makeBanner(
+        `Preview calibration complete (web mode, fingerprint=${fp})`,
+        "info"
+      ),
+    });
   },
   resetSettingKey: (key) => {
     void invokeCommand("reset_setting_key", { key });
@@ -1325,7 +1612,77 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       const defVal = (DEFAULT_JOB_OPTIONS as unknown as Record<string, unknown>)[key];
       useJobsStore.getState().setOptions({ [key]: defVal } as Partial<JobOptions>);
     }
-    set({ systemBanner: makeBanner(`Reset setting '${key}' to recommended default.`, "info") });
+    const sysDefaults: Partial<SystemState> = {};
+    switch (key) {
+      case "locale":
+        sysDefaults.locale = "en";
+        break;
+      case "theme":
+        sysDefaults.theme = "dark";
+        break;
+      case "ui_scale":
+        sysDefaults.uiScale = 100;
+        break;
+      case "high_contrast":
+        sysDefaults.highContrast = false;
+        break;
+      case "reduced_motion":
+        sysDefaults.reducedMotion = false;
+        break;
+      case "always_on_top":
+        sysDefaults.alwaysOnTop = false;
+        if (isTauriRuntime()) {
+          void import("@tauri-apps/api/window")
+            .then(({ getCurrentWindow }) => getCurrentWindow().setAlwaysOnTop(false))
+            .catch(() => {});
+        }
+        break;
+      case "minimize_to_tray":
+        sysDefaults.minimizeToTray = false;
+        break;
+      case "naming_template":
+      case "file_naming_template":
+        sysDefaults.namingTemplate = "{track}_{stem}";
+        break;
+      case "conflict_policy":
+      case "overwrite_behavior":
+        sysDefaults.conflictPolicy = "append_number";
+        break;
+      case "preserve_folder_structure":
+        sysDefaults.preserveFolderStructure = true;
+        break;
+      case "max_cache_size_gb":
+        sysDefaults.maxCacheSizeGb = 10.0;
+        break;
+      case "hardware_profile_mode":
+        sysDefaults.activeProfileMode = "Auto";
+        break;
+      case "auto_open_folder":
+        useJobsStore.setState({ autoOpenFolder: false });
+        break;
+      case "custom_output_dir":
+      case "default_output_dir":
+        useJobsStore.setState({ customOutputDir: "" });
+        break;
+      case "max_concurrent_jobs":
+        useJobsStore.setState({ parallelWorkers: 2 });
+        break;
+      case "output_format": {
+        const defFmt = DEFAULT_JOB_OPTIONS.output_format === "m4a" ? "aac" : DEFAULT_JOB_OPTIONS.output_format;
+        if (["wav", "flac", "mp3", "ogg", "aac"].includes(defFmt)) {
+          useMixerStore.setState({ exportFormat: defFmt as any });
+        }
+        break;
+      }
+      case "audio_bitrate":
+      case "mp3_bitrate":
+        useMixerStore.setState({ exportBitrate: (DEFAULT_JOB_OPTIONS.audio_bitrate || "320k") as any });
+        break;
+    }
+    set({
+      ...sysDefaults,
+      systemBanner: makeBanner(`Reset setting '${key}' to recommended default.`, "info"),
+    });
   },
   resetAllSettings: () => {
     void invokeCommand("reset_settings_to_defaults");
@@ -1347,47 +1704,129 @@ export const useSystemStore = create<SystemState>((set, get) => ({
     const payload = JSON.stringify(
       {
         version: "3.0.0",
+        locale: get().locale,
         profile_mode: get().activeProfileMode,
         theme: get().theme,
         ui_scale: get().uiScale,
+        high_contrast: get().highContrast,
+        reduced_motion: get().reducedMotion,
+        always_on_top: get().alwaysOnTop,
+        minimize_to_tray: get().minimizeToTray,
         naming_template: get().namingTemplate,
         conflict_policy: get().conflictPolicy,
+        preserve_folder_structure: get().preserveFolderStructure,
+        max_cache_size_gb: get().maxCacheSizeGb,
         options: useJobsStore.getState().options,
       },
       null,
       2
     );
-    set({ systemBanner: makeBanner("Exported settings JSON to clipboard / file.", "success") });
+    const hasClipboard = typeof navigator !== "undefined" && Boolean(navigator.clipboard?.writeText);
+    if (hasClipboard) {
+      void navigator.clipboard.writeText(payload).catch(() => {});
+    }
+    set({
+      systemBanner: makeBanner(
+        hasClipboard ? "Exported settings JSON to clipboard." : "Exported settings JSON.",
+        "success"
+      ),
+    });
     return payload;
   },
   importSettingsJson: (rawJson) => {
-    void invokeCommand("import_settings_json", { rawJson });
     try {
       const parsed = JSON.parse(rawJson);
-      if (parsed.options) {
-        useJobsStore.getState().setOptions(parsed.options);
+      void invokeCommand("import_settings_json", { rawJson });
+
+      const sysPatch: Partial<SystemState> = {};
+      if (parsed.locale) sysPatch.locale = parsed.locale;
+      if (parsed.theme === "dark" || parsed.theme === "light" || parsed.theme === "system") {
+        sysPatch.theme = parsed.theme;
       }
-      set({ systemBanner: makeBanner("Imported settings JSON successfully.", "success") });
+      if ([90, 100, 110, 125].includes(Number(parsed.ui_scale))) {
+        sysPatch.uiScale = Number(parsed.ui_scale) as 90 | 100 | 110 | 125;
+      }
+      if (parsed.high_contrast !== undefined) sysPatch.highContrast = Boolean(parsed.high_contrast);
+      if (parsed.reduced_motion !== undefined) sysPatch.reducedMotion = Boolean(parsed.reduced_motion);
+      if (parsed.always_on_top !== undefined) {
+        const aot = Boolean(parsed.always_on_top);
+        sysPatch.alwaysOnTop = aot;
+        if (isTauriRuntime()) {
+          void import("@tauri-apps/api/window")
+            .then(({ getCurrentWindow }) => getCurrentWindow().setAlwaysOnTop(aot))
+            .catch(() => {});
+        }
+      }
+      if (parsed.minimize_to_tray !== undefined) sysPatch.minimizeToTray = Boolean(parsed.minimize_to_tray);
+      if (parsed.naming_template) sysPatch.namingTemplate = String(parsed.naming_template);
+      if (parsed.conflict_policy) sysPatch.conflictPolicy = parsed.conflict_policy;
+      if (parsed.preserve_folder_structure !== undefined) {
+        sysPatch.preserveFolderStructure = Boolean(parsed.preserve_folder_structure);
+      }
+      if (parsed.max_cache_size_gb !== undefined) {
+        sysPatch.maxCacheSizeGb = Number(parsed.max_cache_size_gb);
+      }
+      if (parsed.profile_mode) sysPatch.activeProfileMode = parsed.profile_mode;
+
+      if (parsed.options && typeof parsed.options === "object") {
+        useJobsStore.setState((s) => ({ options: { ...s.options, ...parsed.options } }));
+        const fmt = parsed.options.output_format === "m4a" ? "aac" : parsed.options.output_format;
+        if (fmt && ["wav", "flac", "mp3", "ogg", "aac"].includes(fmt)) {
+          useMixerStore.setState({ exportFormat: fmt });
+        }
+        if (parsed.options.audio_bitrate) {
+          useMixerStore.setState({ exportBitrate: parsed.options.audio_bitrate });
+        }
+      }
+
+      set({
+        ...sysPatch,
+        systemBanner: makeBanner("Imported settings JSON successfully.", "success"),
+      });
     } catch {
       set({ systemBanner: makeBanner("Failed to parse imported settings JSON.", "error") });
     }
   },
-  registerFileAssociations: () => {
-    void invokeCommand("register_file_associations");
-    set({
-      fileAssociationsRegistered: true,
-      systemBanner: makeBanner(
-        "Registered Windows File Associations (.mp3, .wav, .flac, .ogg, .mp4, .mkv, .avi, .mov) in HKCU\\Software\\Classes",
-        "success"
-      ),
-    });
+  registerFileAssociations: async () => {
+    try {
+      if (isTauriRuntime()) {
+        await invokeCommandStrict("register_file_associations");
+      }
+      set({
+        fileAssociationsRegistered: true,
+        systemBanner: makeBanner(
+          "Registered Windows File Associations (.mp3, .wav, .flac, .ogg, .mp4, .mkv, .avi, .mov) in HKCU\\Software\\Classes",
+          "success"
+        ),
+      });
+    } catch (err: any) {
+      set({
+        fileAssociationsRegistered: false,
+        systemBanner: makeBanner(
+          `Failed to register file associations: ${String(err?.message || err)}`,
+          "error"
+        ),
+      });
+    }
   },
-  createDesktopShortcut: () => {
-    void invokeCommand("create_desktop_shortcut");
-    set({
-      desktopShortcutCreated: true,
-      systemBanner: makeBanner("Created Desktop Shortcut (VocalPro.lnk)", "success"),
-    });
+  createDesktopShortcut: async () => {
+    try {
+      if (isTauriRuntime()) {
+        await invokeCommandStrict("create_desktop_shortcut");
+      }
+      set({
+        desktopShortcutCreated: true,
+        systemBanner: makeBanner("Created Desktop Shortcut (VocalPro.lnk)", "success"),
+      });
+    } catch (err: any) {
+      set({
+        desktopShortcutCreated: false,
+        systemBanner: makeBanner(
+          `Failed to create desktop shortcut: ${String(err?.message || err)}`,
+          "error"
+        ),
+      });
+    }
   },
   restartWorker: async () => {
     try {
@@ -1397,7 +1836,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
           health,
           systemBanner: health.running
             ? makeBanner(`AI Engine Ready • PyTorch ${health.torch_version} (${health.cuda_available ? "CUDA" : "CPU"})`, "success")
-            : makeBanner(`AI Worker offline: ${health.last_error || "Check setup.bat"}`, "warning"),
+            : makeBanner(`AI Worker offline: ${health.last_error || "Inspect Settings -> Diagnostics or restart worker"}`, "warning"),
         });
       }
     } catch (err: any) {
@@ -1407,20 +1846,67 @@ export const useSystemStore = create<SystemState>((set, get) => ({
       }));
     }
   },
-  exportDiagnosticBundle: () => {
-    void invokeCommand("export_diagnostic_bundle");
-    set({
-      systemBanner: makeBanner(
-        "Exported diagnostic bundle -> vocalpro_diagnostics.zip (worker_logs.txt, settings.json, worker_health.json)",
-        "success"
-      ),
-    });
+  exportDiagnosticBundle: async () => {
+    try {
+      const savedPath = isTauriRuntime()
+        ? await invokeCommandStrict<string>("export_diagnostic_bundle")
+        : "vocalpro_diagnostics.zip";
+      set({
+        systemBanner: makeBanner(
+          `Exported diagnostic bundle -> ${savedPath || "vocalpro_diagnostics.zip"} (worker_logs.txt, settings.json, worker_health.json)`,
+          "success"
+        ),
+      });
+    } catch (err: any) {
+      set({
+        systemBanner: makeBanner(
+          `Failed to export diagnostic bundle: ${String(err?.message || err)}`,
+          "error"
+        ),
+      });
+    }
   },
   setShowChangelogModal: (v) => set({ showChangelogModal: v }),
+  downloadModel: async (modelId) => {
+    if (get().downloadingModelId) return;
+    set({
+      downloadingModelId: modelId,
+      systemBanner: makeBanner(`Downloading ${modelId} model weights...`, "info"),
+    });
+    try {
+      if (isTauriRuntime()) {
+        const updated = await invokeCommandStrict<ModelInfo[]>("download_model", { modelId });
+        if (updated && Array.isArray(updated) && updated.length > 0) {
+          set({
+            models: updated,
+            systemBanner: makeBanner(
+              `Downloaded & verified ${modelId} model weights locally!`,
+              "success"
+            ),
+          });
+        }
+      } else {
+        set((s) => ({
+          models: s.models.map((m) => (m.id === modelId ? { ...m, cached: true } : m)),
+          systemBanner: makeBanner(`Model ${modelId} marked ready.`, "success"),
+        }));
+      }
+    } catch (err: any) {
+      set({
+        systemBanner: makeBanner(
+          `Failed to download ${modelId}: ${String(err?.message || err)}`,
+          "error"
+        ),
+      });
+    } finally {
+      set({ downloadingModelId: null });
+    }
+  },
   autoOptimizeForHardware: async () => {
     const mode = get().activeProfileMode;
+    const backendMode = mode === "Max Quality" ? "max_quality" : mode.toLowerCase();
     try {
-      const profile = await invokeCommand<HardwareProfile>("auto_optimize_for_hardware", { profileMode: mode });
+      const profile = await invokeCommand<HardwareProfile>("auto_optimize_for_hardware", { profileMode: backendMode });
       if (profile) {
         set({
           hardwareProfile: profile,
@@ -1445,7 +1931,7 @@ export const useSystemStore = create<SystemState>((set, get) => ({
   },
   initApp: async () => {
     try {
-      const [settings, outputs, sepHistory, dlHistory, hw, health, models] = await Promise.all([
+      const [settings, outputs, sepHistory, dlHistory, hw, health, models, savedPresets] = await Promise.all([
         invokeCommand<Record<string, any>>("get_settings"),
         invokeCommand<OutputFolderEntry[]>("list_outputs"),
         invokeCommand<SeparationHistoryEntry[]>("list_separation_history"),
@@ -1453,18 +1939,42 @@ export const useSystemStore = create<SystemState>((set, get) => ({
         invokeCommand<HardwareProfile>("detect_hardware"),
         invokeCommand<WorkerHealth>("worker_health"),
         invokeCommand<ModelInfo[]>("list_models"),
+        invokeCommand<[string, JobOptions][]>("list_presets"),
       ]);
 
       if (settings && Object.keys(settings).length > 0) {
         if (settings.locale) set({ locale: settings.locale });
         if (settings.theme) set({ theme: settings.theme });
+        if (
+          typeof settings.default_opening_screen === "string" &&
+          ["home", "separate", "results", "history", "settings"].includes(
+            settings.default_opening_screen
+          )
+        ) {
+          set({ activeScreen: settings.default_opening_screen as any });
+        }
         if (settings.ui_scale) set({ uiScale: Number(settings.ui_scale) as any });
         if (settings.high_contrast !== undefined) set({ highContrast: Boolean(settings.high_contrast) });
         if (settings.reduced_motion !== undefined) set({ reducedMotion: Boolean(settings.reduced_motion) });
-        if (settings.always_on_top !== undefined) set({ alwaysOnTop: Boolean(settings.always_on_top) });
+        if (settings.always_on_top !== undefined) {
+          const aot = Boolean(settings.always_on_top);
+          set({ alwaysOnTop: aot });
+          if (isTauriRuntime()) {
+            void import("@tauri-apps/api/window")
+              .then(({ getCurrentWindow }) => getCurrentWindow().setAlwaysOnTop(aot))
+              .catch(() => {});
+          }
+        }
         if (settings.minimize_to_tray !== undefined) set({ minimizeToTray: Boolean(settings.minimize_to_tray) });
-        if (settings.onboarding_completed !== undefined || settings.onboarding_done !== undefined) {
-          set({ onboardingDone: Boolean(settings.onboarding_completed ?? settings.onboarding_done) });
+        const onboardingVal = settings.onboarding_completed ?? settings.onboarding_done;
+        if (onboardingVal !== undefined) {
+          const isDone = Boolean(onboardingVal);
+          set({
+            onboardingDone: isDone,
+            showOnboardingModal: isTauriRuntime() && !isDone,
+          });
+        } else if (isTauriRuntime()) {
+          set({ onboardingDone: false, showOnboardingModal: true });
         }
 
         const namingTpl = settings.naming_template || settings.file_naming_template;
@@ -1545,13 +2055,22 @@ export const useSystemStore = create<SystemState>((set, get) => ({
         if (settings.enable_spectral_denoise !== undefined) {
           jobPatch.enable_spectral_denoise = Boolean(settings.enable_spectral_denoise);
         }
+        if (settings.ffmpeg_path !== undefined) {
+          jobPatch.ffmpeg_path = String(settings.ffmpeg_path || "");
+        }
+        if (settings.ffmpeg_faststart !== undefined) {
+          jobPatch.ffmpeg_faststart = Boolean(settings.ffmpeg_faststart);
+        }
 
         if (Object.keys(jobPatch).length > 0) {
           useJobsStore.setState((s) => ({ options: { ...s.options, ...jobPatch } }));
         }
 
         if (settings.output_format) {
-          useMixerStore.setState({ exportFormat: settings.output_format });
+          const mixerFmt = settings.output_format === "m4a" ? "aac" : settings.output_format;
+          if (["wav", "flac", "mp3", "ogg", "aac"].includes(mixerFmt)) {
+            useMixerStore.setState({ exportFormat: mixerFmt as any });
+          }
         }
         if (bitrate) {
           useMixerStore.setState({ exportBitrate: bitrate });
@@ -1594,6 +2113,32 @@ export const useSystemStore = create<SystemState>((set, get) => ({
 
       if (models && Array.isArray(models) && models.length > 0) {
         set({ models });
+      }
+
+      if (savedPresets && Array.isArray(savedPresets) && savedPresets.length > 0) {
+        useLibraryStore.setState((s) => {
+          const map = new Map(s.presets.map((p) => [p.name, p.options]));
+          for (const [name, opts] of savedPresets) {
+            if (name && opts && typeof opts === "object") {
+              map.set(name, { ...DEFAULT_JOB_OPTIONS, ...opts });
+            }
+          }
+          return {
+            presets: Array.from(map.entries()).map(([name, options]) => ({ name, options })),
+          };
+        });
+      }
+
+      if (isTauriRuntime()) {
+        const launchFiles = await invokeCommand<string[]>("consume_launch_files");
+        if (launchFiles && Array.isArray(launchFiles) && launchFiles.length > 0) {
+          useJobsStore.getState().addFiles(launchFiles);
+          set({ activeScreen: "separate", showOnboardingModal: false });
+          get().showBanner(
+            `Loaded ${launchFiles.length} file(s) from OS launch into Separation queue.`,
+            "success"
+          );
+        }
       }
     } catch (e) {
       console.warn("initApp error:", e);

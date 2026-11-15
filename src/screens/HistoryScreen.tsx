@@ -148,7 +148,7 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({ onNavigate }) => {
                   )}
                 </div>
 
-                <div className="text-right font-mono text-xs space-y-0.5">
+                <div className="text-end font-mono text-xs space-y-0.5">
                   <div className="text-[#00F0B5] font-black">{item.elapsed}</div>
                   <div className="text-[11px] text-slate-400">{item.date}</div>
                 </div>

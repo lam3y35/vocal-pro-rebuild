@@ -766,12 +766,15 @@ def test_cinema_movie_export_targets_and_delete_original(tmp_path: Path, monkeyp
     assert any(f.endswith(".mp3") for f in files_both), "Audio stem exists"
 
 
-def test_resolve_ffmpeg_fallback():
-    """Verify resolve_ffmpeg finds system or candidate ffmpeg."""
+def test_resolve_ffmpeg_fallback(tmp_path: Path):
+    """Verify resolve_ffmpeg finds system or candidate ffmpeg and rejects non-ffmpeg binaries."""
     res = engine.resolve_ffmpeg()
     assert res is not None and len(res) > 0
-    # Custom existing path takes precedence
-    fake_custom = sys.executable
-    assert engine.resolve_ffmpeg(fake_custom) == fake_custom
+    # Valid custom ffmpeg path takes precedence
+    custom_ffmpeg = tmp_path / ("ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+    custom_ffmpeg.write_bytes(b"MZ")
+    assert engine.resolve_ffmpeg(str(custom_ffmpeg)) == str(custom_ffmpeg)
+    # Arbitrary non-ffmpeg executable (e.g. python.exe) is rejected and falls back cleanly
+    assert engine.resolve_ffmpeg(sys.executable) == res
 
 

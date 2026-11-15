@@ -93,12 +93,16 @@ class WorkerApp:
             )
         except JobCancelledError:
             out_d = cmd.get("output_dir")
-            if out_d:
+            inp = cmd.get("input_path")
+            if out_d and inp:
                 try:
-                    p = Path(out_d)
-                    if p.is_dir():
-                        for f in p.glob("*.*"):
-                            f.unlink(missing_ok=True)
+                    raw_out = Path(out_d)
+                    base_name = Path(str(inp)).stem
+                    track_dir = raw_out if raw_out.name == base_name else (raw_out / base_name)
+                    if track_dir.is_dir():
+                        for f in track_dir.iterdir():
+                            if f.is_file() and f.name.startswith(f"{base_name}_") and f.suffix == ".part":
+                                f.unlink(missing_ok=True)
                 except Exception:
                     pass
             self.proto.send({"v": 1, "id": cmd_id, "event": "job_cancelled", "job_id": job_id})

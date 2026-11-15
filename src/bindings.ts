@@ -192,6 +192,7 @@ export interface HardwareProfile {
   available_ram_mb: number;
   disk_free_gb: number;
   temp_drive_speed_mb_s?: number;
+  temp_drive_speed_mbps?: number;
   on_battery?: boolean;
   power_source?: string;
   cuda_available: boolean;
@@ -219,10 +220,20 @@ export interface HardwareProfile {
   recommended_safe_mode: boolean;
 }
 
+export type AppScreen = "home" | "separate" | "results" | "history" | "settings";
+
+export interface WaveformSummary {
+  peaks: number[];
+  duration_s: number;
+  sample_rate: number;
+  channels: number;
+}
+
 export interface StemTrackInfo {
   name: string;
   path: string;
   gain: number;
+  pan?: number;
   mute: boolean;
   solo: boolean;
   duration_s: number;
@@ -236,6 +247,7 @@ export interface MixerSnapshot {
   playhead_frame: number;
   playing: boolean;
   stems: StemTrackInfo[];
+  resident_memory_mb?: number;
 }
 
 export interface AnalysisResult {
@@ -265,8 +277,8 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
   large_file_threshold_minutes: 15,
   chunk_duration_minutes: 10,
   overlap_seconds: 5,
-  output_video: true,
-  video_output_mode: "video_only",
+  output_video: false,
+  video_output_mode: "audio_only",
   delete_input_file: false,
   ffmpeg_faststart: true,
   ffmpeg_path: "",

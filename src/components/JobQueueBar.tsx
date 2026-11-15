@@ -41,8 +41,11 @@ export const JobQueueBar: React.FC = () => {
     (j) => !["done", "cancelled", "failed"].includes(j.status)
   ).length;
 
+  const activeOutBasename = activeJob.output_dir.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
   const matchedOutput = outputs.find(
-    (o) => o.folder_path === activeJob.output_dir || activeJob.output_dir.includes(o.folder_name)
+    (o) =>
+      o.folder_path === activeJob.output_dir ||
+      (Boolean(o.folder_name) && o.folder_name === activeOutBasename)
   );
 
   return (
@@ -212,10 +215,17 @@ export const JobQueueBar: React.FC = () => {
                   <span>Open Output Folder</span>
                 </button>
               )}
-              {matchedOutput && (
+              {(matchedOutput || activeJob.output_dir) && (
                 <button
                   type="button"
-                  onClick={() => selectOutput(matchedOutput.id)}
+                  onClick={async () => {
+                    if (matchedOutput) {
+                      selectOutput(matchedOutput.id);
+                    } else if (activeJob.output_dir) {
+                      await useLibraryStore.getState().openFolderInMixer(activeJob.output_dir);
+                    }
+                    useSystemStore.getState().setActiveScreen("results");
+                  }}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#171A26] border border-[#252B3D] hover:border-[#6C63FF] text-slate-200 font-semibold transition"
                 >
                   <Sliders className="w-3.5 h-3.5 text-[#6C63FF]" />

@@ -52,11 +52,9 @@ def detect_vocal_activity(
     log_spec = 20.0 * np.log10(np.maximum(1e-5, rms)) - 20.0 * np.log10(max(1e-5, ref_val))
     rms_db = np.maximum(log_spec, log_spec.max() - 80.0)
 
-    # 2. Fast vectorized Spectral Flatness via PyTorch (isolated to 1 thread to prevent OpenMP contention)
+    # 2. Fast vectorized Spectral Flatness via PyTorch (multi-threaded & thread-safe)
     window = _get_hann_window(frame_length)
-    orig_th = torch.get_num_threads()
-    torch.set_num_threads(1)
-    try:
+    with torch.inference_mode():
         tensor = torch.from_numpy(mono.astype(np.float32, copy=False))
         stft = torch.stft(tensor, n_fft=frame_length, hop_length=hop_length, window=window, center=True, return_complex=True)
         s_mag = torch.abs(stft)
@@ -64,25 +62,35 @@ def detect_vocal_activity(
         gmean = torch.exp(torch.mean(torch.log(s_thresh), dim=-2))
         amean = torch.mean(s_thresh, dim=-2)
         flatness = (gmean / amean).numpy()
-    finally:
-        torch.set_num_threads(orig_th)
 
     vocal_score = (rms_db > threshold_db).astype(np.float32) * 0.6 + (1.0 - flatness) * 0.4
-
-    mask = np.repeat(vocal_score, hop_length).astype(np.float32)
-    if len(mask) > total_samples:
-        mask = mask[:total_samples]
-    elif len(mask) < total_samples:
-        mask = np.pad(mask, (0, total_samples - len(mask)))
 
     kernel_size = max(3, int(min_vocal_duration * sr / hop_length))
     if kernel_size % 2 == 0:
         kernel_size += 1
-    mask = median_filter(mask, size=kernel_size)
 
     margin_samples = margin_frames * hop_length
-    if margin_samples > 1:
-        mask = maximum_filter(mask, size=margin_samples)
+    if kernel_size > hop_length or margin_frames <= 0 or margin_frames % 2 != 0:
+        mask = np.repeat(vocal_score, hop_length).astype(np.float32)
+        if len(mask) > total_samples:
+            mask = mask[:total_samples]
+        elif len(mask) < total_samples:
+            mask = np.pad(mask, (0, total_samples - len(mask)))
+        mask = median_filter(mask, size=kernel_size)
+        if margin_samples > 1:
+            mask = maximum_filter(mask, size=margin_samples)
+    else:
+        # Bit-exact frame-level maximum_filter equivalent of running median_filter(size<=hop) + maximum_filter(even margin) at sample rate
+        vs0 = maximum_filter(vocal_score, size=margin_frames)
+        vs1 = maximum_filter(vocal_score, size=margin_frames + 1)
+        mat = np.empty((len(vs1), hop_length), dtype=np.float32)
+        mat[:, 0] = vs0
+        mat[:, 1:] = vs1[:, np.newaxis]
+        mask = mat.reshape(-1)
+        if len(mask) > total_samples:
+            mask = mask[:total_samples].copy()
+        elif len(mask) < total_samples:
+            mask = np.pad(mask, (0, total_samples - len(mask)))
 
     fade_len = int(0.02 * sr)
     if fade_len > 0:
@@ -90,25 +98,15 @@ def detect_vocal_activity(
         rise_starts = np.where(diff > 0.5)[0]
         fall_ends = np.where(diff < -0.5)[0]
 
-        if len(rise_starts) > 0:
-            max_ramp = fade_len
-            ramps = np.empty((len(rise_starts), max_ramp), dtype=np.float32)
-            actual_lens = np.empty(len(rise_starts), dtype=np.intp)
-            for j, idx in enumerate(rise_starts):
-                ramp_end = min(idx + fade_len, total_samples)
-                rl = ramp_end - idx
-                actual_lens[j] = rl
-                ramp = 0.5 * (1 - np.cos(np.linspace(0, np.pi, rl)))
-                ramps[j, :rl] = ramp
-            for j, idx in enumerate(rise_starts):
-                rl = actual_lens[j]
-                mask[idx : idx + rl] = np.minimum(mask[idx : idx + rl], ramps[j, :rl])
+        for idx in rise_starts:
+            ramp_end = min(idx + fade_len, total_samples)
+            ramp = 0.5 * (1 - np.cos(np.linspace(0, np.pi, ramp_end - idx)))
+            mask[idx:ramp_end] = np.minimum(mask[idx:ramp_end], ramp)
 
-        if len(fall_ends) > 0:
-            for j, idx in enumerate(fall_ends):
-                ramp_start = max(idx - fade_len, 0)
-                ramp = 0.5 * (1 + np.cos(np.linspace(0, np.pi, idx - ramp_start)))
-                mask[ramp_start:idx] = np.minimum(mask[ramp_start:idx], ramp)
+        for idx in fall_ends:
+            ramp_start = max(idx - fade_len, 0)
+            ramp = 0.5 * (1 + np.cos(np.linspace(0, np.pi, idx - ramp_start)))
+            mask[ramp_start:idx] = np.minimum(mask[ramp_start:idx], ramp)
 
     return np.clip(mask, 0.0, 1.0)
 

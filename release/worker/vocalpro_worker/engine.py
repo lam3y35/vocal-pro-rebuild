@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import gc
+import inspect
+import json
 import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -39,6 +42,110 @@ AUDIO_EXTENSIONS: set[str] = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", "
 
 MODEL_CACHE: dict[str, Any] = {}
 _CACHE_LOCK = threading.Lock()
+_THREAD_CTX = threading.local()
+
+
+def _subprocess_window_kwargs() -> dict[str, Any]:
+    """Suppress flashing console windows when invoking ffmpeg/ffprobe on Windows."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
+def _run_ffmpeg_subprocess(cmd: list[str], ffmpeg_bin: str) -> subprocess.CompletedProcess[str]:
+    """Run an FFmpeg subprocess and surface missing binaries as FFMPEG_MISSING."""
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            **_subprocess_window_kwargs(),
+        )
+    except FileNotFoundError as exc:
+        raise WorkerEngineError(
+            "FFMPEG_MISSING",
+            f"FFmpeg binary not found ('{ffmpeg_bin}'). Install FFmpeg or configure its path in Settings.",
+            detail=str(exc),
+        ) from exc
+
+
+def _ensure_checkpoints_populated(hub_dir: Path) -> Path:
+    """Ensure PyTorch Hub checkpoints/ contains any top-level weight files under hub_dir."""
+    ckpt = hub_dir / "checkpoints"
+    flat_weights = [
+        p for p in (*hub_dir.glob("*.th"), *hub_dir.glob("*.yaml")) if p.is_file()
+    ]
+    if flat_weights:
+        try:
+            ckpt.mkdir(parents=True, exist_ok=True)
+            for src in flat_weights:
+                dst = ckpt / src.name
+                if not dst.exists():
+                    try:
+                        os.link(src, dst)
+                    except OSError:
+                        shutil.copy2(src, dst)
+        except OSError:
+            pass
+    return hub_dir
+
+
+def _resolve_local_models_hub_dir() -> Optional[Path]:
+    """Resolve torch.hub directory from VOCALPRO_MODELS_DIR or default VocalPro install dirs."""
+    models_dir = os.environ.get("VOCALPRO_MODELS_DIR")
+    if models_dir and Path(models_dir).is_dir():
+        p = Path(models_dir)
+        hub = p.parent if p.name == "checkpoints" else p
+        return _ensure_checkpoints_populated(hub)
+
+    candidates: list[Path] = []
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([exe_dir / "models", exe_dir.parent / "models"])
+    except Exception:
+        pass
+    for env_key in ("LOCALAPPDATA", "APPDATA"):
+        base = os.environ.get(env_key, "").strip()
+        if base:
+            candidates.append(Path(base) / "VocalPro" / "models")
+
+    for p in candidates:
+        if not p.is_dir():
+            continue
+        if (p / "checkpoints").is_dir():
+            ckpt = p / "checkpoints"
+            if any(ckpt.glob("*.th")) or any(ckpt.glob("*.yaml")):
+                return _ensure_checkpoints_populated(p)
+        if any(p.glob("*.th")) or any(p.glob("*.yaml")):
+            return _ensure_checkpoints_populated(p)
+    return None
+_APPLY_MODEL_HAS_CALLBACK = "callback" in inspect.signature(apply_model).parameters
+
+
+def _install_forward_callback_hook(model: Any) -> None:
+    """Instrument model leaf forward() once so Demucs versions without apply_model(callback=...) still emit segment progress & cancel cleanly."""
+    targets = list(model.models) if isinstance(model, BagOfModels) else [model]
+    total_subs = len(targets)
+    with _CACHE_LOCK:
+        for sub_idx, sub in enumerate(targets):
+            if getattr(sub, "_vp_forward_hooked", False):
+                continue
+            orig_forward = sub.forward
+
+            def _make_wrapped(fn: Any, s_idx: int, s_tot: int) -> Any:
+                def _wrapped_forward(*args: Any, **kwargs: Any) -> Any:
+                    cb = getattr(_THREAD_CTX, "demucs_cb", None)
+                    if cb is not None:
+                        cb({"state": "start", "model_idx_in_bag": s_idx, "models": s_tot})
+                    out = fn(*args, **kwargs)
+                    if cb is not None:
+                        cb({"state": "end", "model_idx_in_bag": s_idx, "models": s_tot})
+                    return out
+
+                return _wrapped_forward
+
+            sub.forward = _make_wrapped(orig_forward, sub_idx, total_subs)
+            sub._vp_forward_hooked = True
 
 
 class JobCancelledError(BaseException):
@@ -55,12 +162,75 @@ class WorkerEngineError(Exception):
         self.detail = detail
 
 
+def _is_valid_ffmpeg_binary(candidate: Path) -> bool:
+    """Validate that a custom or env-configured FFmpeg path refers to an actual ffmpeg binary."""
+    return (
+        candidate.is_file()
+        and "ffmpeg" in candidate.name.lower()
+        and candidate.suffix.lower() in ("", ".exe")
+    )
+
+
 def resolve_ffmpeg(custom_path: str = "") -> str:
-    """Resolve the ffmpeg binary path."""
-    if custom_path and Path(custom_path).is_file():
-        return custom_path
+    """Resolve the ffmpeg binary path across custom settings, PATH, and adjacent directories."""
+    if custom_path:
+        custom_p = Path(custom_path)
+        if _is_valid_ffmpeg_binary(custom_p):
+            return custom_path
+
+    env_ffmpeg = os.environ.get("VOCALPRO_FFMPEG")
+    if env_ffmpeg is not None:
+        env_p = Path(env_ffmpeg)
+        if env_ffmpeg.strip() and _is_valid_ffmpeg_binary(env_p):
+            return env_ffmpeg
+        if env_ffmpeg.strip().lower() in ("none", "disabled", "false", "0") or not env_p.exists():
+            return ""
+
     found = shutil.which("ffmpeg")
-    return found or "ffmpeg"
+    if found:
+        return found
+
+    # Candidates adjacent to Python executable, venv, or app resources
+    exe_dir = Path(sys.executable).parent
+    cwd = Path.cwd()
+    candidates = [
+        exe_dir / "ffmpeg.exe",
+        exe_dir / "ffmpeg",
+        exe_dir.parent / "ffmpeg.exe",
+        exe_dir.parent / "ffmpeg",
+        exe_dir.parent.parent / "ffmpeg.exe",
+        exe_dir.parent.parent / "ffmpeg",
+        exe_dir.parent / "resources" / "ffmpeg.exe",
+        exe_dir.parent / "resources" / "ffmpeg",
+        cwd / "resources" / "ffmpeg.exe",
+        cwd / "resources" / "ffmpeg",
+        cwd / "ffmpeg.exe",
+        cwd / "ffmpeg",
+    ]
+
+    # Windows user directory fallbacks
+    if sys.platform.startswith("win"):
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / "VocalPro" / "engine" / "ffmpeg.exe")
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata:
+            candidates.append(Path(localappdata) / "VocalPro" / "engine" / "ffmpeg.exe")
+            candidates.append(Path(localappdata) / "Programs" / "ffmpeg" / "bin" / "ffmpeg.exe")
+            candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe")
+        candidates.append(Path("C:/ffmpeg/bin/ffmpeg.exe"))
+    else:
+        candidates.extend([
+            Path("/usr/bin/ffmpeg"),
+            Path("/usr/local/bin/ffmpeg"),
+            Path("/opt/homebrew/bin/ffmpeg"),
+        ])
+
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+
+    return "ffmpeg"
 
 
 def load_demucs_model(model_name: str, device: torch.device) -> Any:
@@ -69,6 +239,9 @@ def load_demucs_model(model_name: str, device: torch.device) -> Any:
     with _CACHE_LOCK:
         if cache_key in MODEL_CACHE:
             return MODEL_CACHE[cache_key]
+
+    if model_name not in MODEL_POOL:
+        raise WorkerEngineError("MODEL_MISSING", f"Model '{model_name}' not found in registry")
 
     if os.environ.get("VOCALPRO_TEST_FAST_MODEL") == "1":
         sources = (
@@ -98,6 +271,9 @@ def load_demucs_model(model_name: str, device: torch.device) -> Any:
         )
 
     try:
+        hub_dir = _resolve_local_models_hub_dir()
+        if hub_dir is not None:
+            torch.hub.set_dir(str(hub_dir))
         model = get_model(model_name)
         model.to(device)
         model.eval()
@@ -152,7 +328,7 @@ def decode_audio_stereo_44k(input_path: Path, ffmpeg_bin: str = "ffmpeg") -> tup
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_wav = Path(tmp.name)
     try:
-        proc = subprocess.run(
+        proc = _run_ffmpeg_subprocess(
             [
                 ffmpeg_bin,
                 "-y",
@@ -173,8 +349,7 @@ def decode_audio_stereo_44k(input_path: Path, ffmpeg_bin: str = "ffmpeg") -> tup
                 "+genpts",
                 str(tmp_wav),
             ],
-            capture_output=True,
-            text=True,
+            ffmpeg_bin,
         )
         if proc.returncode != 0 or not tmp_wav.exists() or tmp_wav.stat().st_size == 0:
             raise WorkerEngineError(
@@ -231,7 +406,7 @@ def write_encoded_stem(
                 tmp_wav = Path(tmp.name)
             try:
                 sf.write(str(tmp_wav), audio_2d, sr, subtype="PCM_16")
-                proc = subprocess.run(
+                proc = _run_ffmpeg_subprocess(
                     [
                         ffmpeg_bin,
                         "-y",
@@ -243,8 +418,7 @@ def write_encoded_stem(
                         audio_bitrate or "320k",
                         str(target_path),
                     ],
-                    capture_output=True,
-                    text=True,
+                    ffmpeg_bin,
                 )
                 if proc.returncode != 0:
                     err_msg = (proc.stderr or "").lower()
@@ -268,7 +442,7 @@ def write_encoded_stem(
                 tmp_wav = Path(tmp.name)
             try:
                 sf.write(str(tmp_wav), audio_2d, sr, subtype="PCM_16")
-                proc = subprocess.run(
+                proc = _run_ffmpeg_subprocess(
                     [
                         ffmpeg_bin,
                         "-y",
@@ -280,8 +454,7 @@ def write_encoded_stem(
                         audio_bitrate or "320k",
                         str(target_path),
                     ],
-                    capture_output=True,
-                    text=True,
+                    ffmpeg_bin,
                 )
                 if proc.returncode != 0:
                     err_msg = (proc.stderr or "").lower()
@@ -474,33 +647,35 @@ def _infer_single_tensor(
         and os.environ.get("VOCALPRO_DISABLE_FP16") != "1"
     )
     mix_tensor = torch.from_numpy(mix_ch).unsqueeze(0).to(device)
+    if not _APPLY_MODEL_HAS_CALLBACK:
+        _install_forward_callback_hook(model)
     try:
+        if os.environ.get("VOCALPRO_SIMULATE_CUDA_OOM") == "1":
+            os.environ["VOCALPRO_SIMULATE_CUDA_OOM"] = "0"
+            raise WorkerEngineError(
+                "OOM_CUDA",
+                "CUDA GPU out of memory during inference",
+                detail="CUDA out of memory (simulated)",
+            )
+        apply_kwargs: dict[str, Any] = {
+            "shifts": int(shifts),
+            "split": True,
+            "overlap": eff_overlap,
+            "progress": False,
+            "device": device,
+            "segment": eff_segment,
+        }
+        if _APPLY_MODEL_HAS_CALLBACK:
+            apply_kwargs["callback"] = _demucs_cb
+        else:
+            _THREAD_CTX.demucs_cb = _demucs_cb
+
         with torch.inference_mode():
             if use_fp16 and hasattr(torch, "autocast"):
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    estimates = apply_model(
-                        model,
-                        mix_tensor,
-                        shifts=int(shifts),
-                        split=True,
-                        overlap=eff_overlap,
-                        progress=False,
-                        device=device,
-                        segment=eff_segment,
-                        callback=_demucs_cb,
-                    )
+                    estimates = apply_model(model, mix_tensor, **apply_kwargs)
             else:
-                estimates = apply_model(
-                    model,
-                    mix_tensor,
-                    shifts=int(shifts),
-                    split=True,
-                    overlap=eff_overlap,
-                    progress=False,
-                    device=device,
-                    segment=eff_segment,
-                    callback=_demucs_cb,
-                )
+                estimates = apply_model(model, mix_tensor, **apply_kwargs)
     except JobCancelledError:
         raise
     except RuntimeError as exc:
@@ -512,6 +687,7 @@ def _infer_single_tensor(
             raise WorkerEngineError("OOM_RAM", "System RAM exhausted during inference", detail=msg) from exc
         raise WorkerEngineError("INTERNAL", f"Demucs inference error: {msg}", detail=msg) from exc
     finally:
+        _THREAD_CTX.demucs_cb = None
         del mix_tensor
 
     # estimates shape: (1, num_sources, channels, samples)
@@ -645,7 +821,7 @@ def run_separation_job(
         audio_arr: np.ndarray,
         prog_cb: Callable[[int, int, int, int, float], None],
     ) -> dict[str, np.ndarray]:
-        nonlocal device
+        nonlocal device, primary_model, secondary_model, shifts, segment_s
         try:
             return _infer_single_tensor(
                 mdl,
@@ -665,10 +841,18 @@ def run_separation_job(
                     12.0,
                     message="VRAM limit reached — automatically falling back to CPU safe segment...",
                 )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 device = torch.device("cpu")
-                cpu_mdl = load_demucs_model("htdemucs_ft" if ensemble_mode else model_name, device)
+                is_secondary = (secondary_model is not None and mdl is secondary_model)
+                primary_model = load_demucs_model("htdemucs_ft" if ensemble_mode else model_name, device)
+                if secondary_model is not None:
+                    secondary_model = load_demucs_model("mdx_extra", device)
+                current_model = secondary_model if is_secondary else primary_model
+                shifts = 0
+                segment_s = 4.0
                 return _infer_single_tensor(
-                    cpu_mdl,
+                    current_model,
                     audio_arr,
                     device,
                     0,
@@ -707,12 +891,27 @@ def run_separation_job(
             def _chunk_prog(
                 s_i: int, s_t: int, m_i: int, m_t: int, eta: float, _c_idx: int = c_idx
             ) -> None:
-                chunk_frac = (_c_idx + (s_i / max(1, s_t))) / max(1, num_chunks)
+                sub_frac = (0.5 * (s_i / max(1, s_t))) if (ensemble_mode and secondary_model is not None) else (s_i / max(1, s_t))
+                chunk_frac = (_c_idx + sub_frac) / max(1, num_chunks)
                 pct = 10.0 + 68.0 * chunk_frac
                 lbl = f"Movie Chunk {_c_idx + 1}/{num_chunks}" if is_movie else f"Chunk {_c_idx + 1}/{num_chunks}"
                 send_progress("inference", pct, s_i, s_t, m_i, m_t, eta, lbl)
 
             c_stems = _infer_with_oom_recovery(primary_model, sub_mix, _chunk_prog)
+            if ensemble_mode and secondary_model is not None:
+                def _ens_chunk_prog(
+                    s_i: int, s_t: int, m_i: int, m_t: int, eta: float, _c_idx: int = c_idx
+                ) -> None:
+                    chunk_frac = (_c_idx + 0.5 + 0.5 * (s_i / max(1, s_t))) / max(1, num_chunks)
+                    pct = 10.0 + 68.0 * chunk_frac
+                    lbl = f"Ensemble Movie Chunk {_c_idx + 1}/{num_chunks}" if is_movie else f"Ensemble Chunk {_c_idx + 1}/{num_chunks}"
+                    send_progress("inference", pct, s_i, s_t, m_i, m_t, eta, lbl)
+
+                sec_c_stems = _infer_with_oom_recovery(secondary_model, sub_mix, _ens_chunk_prog)
+                for k in list(c_stems.keys()):
+                    if k in sec_c_stems:
+                        c_stems[k] = (0.5 * c_stems[k] + 0.5 * sec_c_stems[k]).astype(np.float32)
+
             for k, arr in c_stems.items():
                 stem_chunks.setdefault(k, []).append(arr.T)  # (samples, channels) for smooth_crossfade_chunks
 
@@ -954,7 +1153,13 @@ def run_separation_job(
         # Probe video start time offset to guarantee microsecond lip-sync
         video_start_offset = 0.0
         try:
-            ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
+            ffmpeg_parent = Path(ffmpeg_bin).parent if Path(ffmpeg_bin).parent != Path(".") else None
+            ffprobe_candidates = []
+            if ffmpeg_parent is not None:
+                ffprobe_candidates.extend([ffmpeg_parent / "ffprobe.exe", ffmpeg_parent / "ffprobe"])
+            ffprobe_bin = next((str(c) for c in ffprobe_candidates if c.is_file()), None)
+            if not ffprobe_bin:
+                ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
             probe_cmd = [
                 ffprobe_bin,
                 "-v",
@@ -967,7 +1172,7 @@ def run_separation_job(
                 "json",
                 str(input_path),
             ]
-            p_res = subprocess.run(probe_cmd, capture_output=True, text=True)
+            p_res = subprocess.run(probe_cmd, capture_output=True, text=True, **_subprocess_window_kwargs())
             if p_res.returncode == 0:
                 p_json = json.loads(p_res.stdout)
                 streams = p_json.get("streams", [])
@@ -983,6 +1188,7 @@ def run_separation_job(
         # -shortest: Terminates stream at exact video duration so player never freezes at final video frame
         # -c:v copy: 100% lossless video stream passthrough (zero re-encoding, zero storage overhead)
         # -c:a aac -b:a 320k: Studio master broadcast audio quality in compact footprint
+        mux_audio_codec = "libopus" if clean_ext == ".webm" else "aac"
         cmd = [
             ffmpeg_bin,
             "-y",
@@ -1003,7 +1209,7 @@ def run_separation_job(
             "-c:v",
             "copy",
             "-c:a",
-            "aac",
+            mux_audio_codec,
             "-b:a",
             audio_bitrate,
             "-ar",
@@ -1024,9 +1230,10 @@ def run_separation_job(
             cmd.extend(["-movflags", "+faststart"])
         cmd.append(str(clean_video_path))
 
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = _run_ffmpeg_subprocess(cmd, ffmpeg_bin)
         # If subtitle copy failed (e.g. incompatible subtitle codec with target container), fallback without subtitle copy
         if proc.returncode != 0:
+            clean_video_path.unlink(missing_ok=True)
             cmd_fallback = [
                 ffmpeg_bin,
                 "-y",
@@ -1045,7 +1252,7 @@ def run_separation_job(
                 "-c:v",
                 "copy",
                 "-c:a",
-                "aac",
+                mux_audio_codec,
                 "-b:a",
                 audio_bitrate,
                 "-ar",
@@ -1063,8 +1270,8 @@ def run_separation_job(
             if clean_ext == ".mp4" and bool(opts.get("ffmpeg_faststart", True)):
                 cmd_fallback.extend(["-movflags", "+faststart"])
             cmd_fallback.append(str(clean_video_path))
-            proc = subprocess.run(cmd_fallback, capture_output=True, text=True)
-        if proc.returncode == 0 and clean_video_path.exists():
+            proc = _run_ffmpeg_subprocess(cmd_fallback, ffmpeg_bin)
+        if proc.returncode == 0 and clean_video_path.exists() and clean_video_path.stat().st_size > 0:
             written_stems.append(
                 {
                     "name": "video_clean",
@@ -1074,7 +1281,7 @@ def run_separation_job(
                     "channels": 2,
                 }
             )
-            if video_output_mode == "video_only":
+            if video_output_mode == "video_only" and not save_all_stems:
                 vocals_path.unlink(missing_ok=True)
                 if "karaoke_path" in locals():
                     karaoke_path.unlink(missing_ok=True)
@@ -1084,17 +1291,29 @@ def run_separation_job(
                     if s["name"] != "video_clean":
                         Path(s["path"]).unlink(missing_ok=True)
                 written_stems = [s for s in written_stems if s["name"] == "video_clean"]
+        else:
+            clean_video_path.unlink(missing_ok=True)
+            stderr_txt = proc.stderr if isinstance(proc.stderr, str) else ""
+            raise WorkerEngineError(
+                "ENCODE_FAILED",
+                f"Failed to remux clean video track {clean_video_path.name}",
+                detail=stderr_txt[-500:] if stderr_txt else "ffmpeg video remux failed",
+            )
 
-    # Optional: Delete original input file after successful export to save disk space
+    # Optional: Delete original input file ONLY after verifying all requested stems exist and are non-empty
     if bool(opts.get("delete_input_file", False)):
         try:
-            if input_path.exists():
+            outputs_verified = bool(written_stems) and all(
+                Path(s["path"]).is_file() and Path(s["path"]).stat().st_size > 0 for s in written_stems
+            )
+            if outputs_verified and input_path.exists():
                 input_path.unlink(missing_ok=True)
         except Exception:
             pass
 
     send_progress("writing", 100.0, 1, 1, 1, 1, 0.0, "Separation complete")
     elapsed_s = round(time.perf_counter() - t_job_start, 3)
+    gc.collect()
 
     return {
         "job_id": job_id,

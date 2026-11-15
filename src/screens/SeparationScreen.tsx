@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   AudioWaveform,
   BookmarkPlus,
   ChevronDown,
@@ -12,6 +13,7 @@ import {
   FolderOutput,
   Info,
   Layers,
+  Pause,
   Play,
   Plus,
   Sliders,
@@ -24,13 +26,13 @@ import { DeviceOption, ModelName, OutputFormat, OutputMode, VideoOutputMode } fr
 import { CanvasWaveform } from "../components/CanvasWaveform";
 import { JobQueueBar } from "../components/JobQueueBar";
 import { TRANSLATIONS } from "../i18n/translations";
-import { invokeCommand } from "../ipc";
+import { invokeCommand, isTauriRuntime, toAssetUrl } from "../ipc";
 import { useJobsStore, useLibraryStore, useSystemStore } from "../state/appStores";
 
 export const SeparationScreen: React.FC = () => {
   const locale = useSystemStore((s) => s.locale);
   const models = useSystemStore((s) => s.models);
-  const t = TRANSLATIONS[locale];
+  const t = TRANSLATIONS[locale] ?? TRANSLATIONS.en;
 
   const selectedFiles = useJobsStore((s) => s.selectedFiles);
   const addFiles = useJobsStore((s) => s.addFiles);
@@ -46,6 +48,7 @@ export const SeparationScreen: React.FC = () => {
   const autoOpenFolder = useJobsStore((s) => s.autoOpenFolder);
   const setAutoOpenFolder = useJobsStore((s) => s.setAutoOpenFolder);
   const previewWaveform = useJobsStore((s) => s.previewWaveform);
+  const previewDurationSec = useJobsStore((s) => s.previewDurationSec);
   const startSeparationBatch = useJobsStore((s) => s.startSeparationBatch);
   const logs = useJobsStore((s) => s.logs);
   const jobs = useJobsStore((s) => s.jobs);
@@ -59,20 +62,143 @@ export const SeparationScreen: React.FC = () => {
   const [downloadUrlInput, setDownloadUrlInput] = useState("");
   const [downloadCustomNameInput, setDownloadCustomNameInput] = useState("");
   const [presetNameInput, setPresetNameInput] = useState("");
-  const [previewRatio, setPreviewRatio] = useState(0.22);
+  const [previewRatio, setPreviewRatio] = useState(0);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [previewMetaDurationSec, setPreviewMetaDurationSec] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [showAdvancedDsp, setShowAdvancedDsp] = useState(false);
-  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const primaryInputFile = selectedFiles[0] || "";
+  const hasVideoFile = selectedFiles.some((f) => /\.(mp4|mkv|avi|mov|webm|flv|wmv)$/i.test(f));
+  const effectivePreviewDur = previewMetaDurationSec || previewDurationSec || 0;
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview().onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") {
+            setIsDragging(true);
+          } else if (payload.type === "leave") {
+            setIsDragging(false);
+          } else if (payload.type === "drop") {
+            setIsDragging(false);
+            if (payload.paths && payload.paths.length > 0) {
+              useJobsStore.getState().addFiles(payload.paths);
+            }
+          }
+        })
+      )
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    setPreviewPlaying(false);
+    setPreviewRatio(0);
+    setPreviewMetaDurationSec(0);
+    const prev = previewAudioRef.current;
+    if (prev) {
+      prev.pause();
+      prev.src = "";
+      previewAudioRef.current = null;
+    }
+    if (!primaryInputFile) return;
+
+    const audio = new Audio(toAssetUrl(primaryInputFile));
+    audio.preload = "metadata";
+    const onMeta = () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setPreviewMetaDurationSec(audio.duration);
+      }
+    };
+    const onTime = () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setPreviewRatio(Math.min(1, Math.max(0, audio.currentTime / audio.duration)));
+      }
+    };
+    const onEnded = () => {
+      setPreviewPlaying(false);
+      setPreviewRatio(0);
+    };
+    audio.addEventListener("loadedmetadata", onMeta);
+    audio.addEventListener("timeupdate", onTime);
+    audio.addEventListener("ended", onEnded);
+    previewAudioRef.current = audio;
+
+    return () => {
+      audio.pause();
+      audio.removeEventListener("loadedmetadata", onMeta);
+      audio.removeEventListener("timeupdate", onTime);
+      audio.removeEventListener("ended", onEnded);
+      audio.src = "";
+      if (previewAudioRef.current === audio) {
+        previewAudioRef.current = null;
+      }
+    };
+  }, [primaryInputFile]);
+
+  const toggleInputPreview = async () => {
+    const audio = previewAudioRef.current;
+    if (!audio || !primaryInputFile) return;
+    if (previewPlaying) {
+      audio.pause();
+      setPreviewPlaying(false);
+    } else {
+      try {
+        await audio.play();
+        setPreviewPlaying(true);
+      } catch {
+        setPreviewPlaying(false);
+        useSystemStore
+          .getState()
+          .showBanner("Input preview requires desktop asset playback or a supported browser codec.", "info");
+      }
+    }
+  };
+
+  const handlePreviewSeek = (ratio: number) => {
+    const clamped = Math.max(0, Math.min(1, ratio));
+    setPreviewRatio(clamped);
+    const audio = previewAudioRef.current;
+    if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+      audio.currentTime = clamped * audio.duration;
+    }
+  };
+
+  const formatMmSs = (sec: number) => {
+    if (!Number.isFinite(sec) || sec <= 0) return "00:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  };
 
   const handleBrowse = async () => {
-    try {
-      const picked = await invokeCommand<string[]>("pick_audio_files");
-      if (picked && Array.isArray(picked) && picked.length > 0) {
-        addFiles(picked);
-        return;
+    if (isTauriRuntime()) {
+      try {
+        const picked = await invokeCommand<string[]>("pick_audio_files");
+        if (picked && Array.isArray(picked) && picked.length > 0) {
+          addFiles(picked);
+        }
+      } catch (e) {
+        console.warn("pick_audio_files failed:", e);
       }
-    } catch (e) {
-      console.warn("pick_audio_files failed, falling back to input:", e);
+      return;
     }
     fileInputRef.current?.click();
   };
@@ -95,6 +221,9 @@ export const SeparationScreen: React.FC = () => {
   const handleDropFiles = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+    if (isTauriRuntime()) {
+      return;
+    }
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
       const paths: string[] = [];
@@ -301,20 +430,43 @@ export const SeparationScreen: React.FC = () => {
 
           {/* 2. Interactive Input Waveform Preview Card */}
           <div className="rounded-2xl bg-[#171A26] border border-[#252B3D] p-5 space-y-3 shadow-xl">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
                 <AudioWaveform className="w-4 h-4 text-[#00F0B5]" />
                 <span>Input Waveform Preview &amp; Scrubbing</span>
               </span>
-              <span className="text-[11px] font-mono text-[#00F0B5] px-2 py-0.5 rounded-full bg-[#00F0B5]/15 border border-[#00F0B5]/30 font-bold">
-                Fast Symphonia Engine
-              </span>
+              <div className="flex items-center gap-2">
+                {primaryInputFile && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void toggleInputPreview()}
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#00F0B5]/15 border border-[#00F0B5]/40 text-[#00F0B5] hover:bg-[#00F0B5]/25 text-[11px] font-bold transition"
+                    >
+                      {previewPlaying ? (
+                        <Pause className="w-3 h-3 fill-current" />
+                      ) : (
+                        <Play className="w-3 h-3 fill-current" />
+                      )}
+                      <span>{previewPlaying ? "Pause" : "Audition"}</span>
+                    </button>
+                    {effectivePreviewDur > 0 && (
+                      <span className="text-[11px] font-mono text-slate-300">
+                        {formatMmSs(previewRatio * effectivePreviewDur)} / {formatMmSs(effectivePreviewDur)}
+                      </span>
+                    )}
+                  </>
+                )}
+                <span className="text-[11px] font-mono text-[#00F0B5] px-2 py-0.5 rounded-full bg-[#00F0B5]/15 border border-[#00F0B5]/30 font-bold">
+                  Fast Symphonia Engine
+                </span>
+              </div>
             </div>
             <CanvasWaveform
               peaks={previewWaveform}
               progressRatio={previewRatio}
               height={76}
-              onSeekRatio={setPreviewRatio}
+              onSeekRatio={handlePreviewSeek}
             />
           </div>
 
@@ -400,7 +552,7 @@ export const SeparationScreen: React.FC = () => {
                 onChange={(e) => toggleSongMode(e.target.checked)}
                 className="sr-only peer"
               />
-              <div className="w-11 h-6 bg-[#11131C] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#00F0B5] border border-[#252B3D]"></div>
+              <div className="w-11 h-6 bg-[#11131C] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#00F0B5] border border-[#252B3D]"></div>
             </label>
           </div>
 
@@ -420,7 +572,7 @@ export const SeparationScreen: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setOptions({ video_output_mode: "video_only", output_video: true })}
-                className={`p-4 rounded-2xl border text-left transition-all flex flex-col justify-between ${
+                className={`p-4 rounded-2xl border text-start transition-all flex flex-col justify-between ${
                   options.video_output_mode === "video_only"
                     ? "bg-[#00F0B5]/15 border-[#00F0B5] text-white shadow-lg shadow-[#00F0B5]/15 ring-1 ring-[#00F0B5]"
                     : "bg-[#11131C] border-[#252B3D] text-slate-400 hover:border-slate-500 hover:text-slate-200"
@@ -443,7 +595,7 @@ export const SeparationScreen: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setOptions({ video_output_mode: "audio_only", output_video: false })}
-                className={`p-4 rounded-2xl border text-left transition-all flex flex-col justify-between ${
+                className={`p-4 rounded-2xl border text-start transition-all flex flex-col justify-between ${
                   options.video_output_mode === "audio_only"
                     ? "bg-[#6C63FF]/20 border-[#6C63FF] text-white shadow-lg shadow-[#6C63FF]/15 ring-1 ring-[#6C63FF]"
                     : "bg-[#11131C] border-[#252B3D] text-slate-400 hover:border-slate-500 hover:text-slate-200"
@@ -466,7 +618,7 @@ export const SeparationScreen: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setOptions({ video_output_mode: "both", output_video: true })}
-                className={`p-4 rounded-2xl border text-left transition-all flex flex-col justify-between ${
+                className={`p-4 rounded-2xl border text-start transition-all flex flex-col justify-between ${
                   options.video_output_mode === "both"
                     ? "bg-[#FFB020]/15 border-[#FFB020] text-white shadow-lg shadow-[#FFB020]/15 ring-1 ring-[#FFB020]"
                     : "bg-[#11131C] border-[#252B3D] text-slate-400 hover:border-slate-500 hover:text-slate-200"
@@ -532,25 +684,38 @@ export const SeparationScreen: React.FC = () => {
             </div>
 
             {/* Option to Delete Original Input File */}
-            <label className="flex items-center justify-between p-3.5 rounded-xl bg-[#11131C] border border-[#252B3D] hover:border-[#FF4D6D]/60 transition cursor-pointer">
-              <div className="flex items-center gap-3">
-                <Trash2 className="w-4 h-4 text-[#FF4D6D] shrink-0" />
-                <div>
-                  <span className="text-xs font-bold text-slate-100">
-                    Delete original input file after successful export
-                  </span>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    Frees disk space immediately once the output movie/audio is verified and saved.
-                  </p>
+            <div className="space-y-2">
+              <label className="flex items-center justify-between p-3.5 rounded-xl bg-[#11131C] border border-[#252B3D] hover:border-[#FF4D6D]/60 transition cursor-pointer">
+                <div className="flex items-center gap-3">
+                  <Trash2 className="w-4 h-4 text-[#FF4D6D] shrink-0" />
+                  <div>
+                    <span className="text-xs font-bold text-slate-100">
+                      Delete original input file after successful export
+                    </span>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Frees disk space immediately once the output movie/audio is verified and saved.
+                    </p>
+                  </div>
                 </div>
-              </div>
-              <input
-                type="checkbox"
-                checked={Boolean(options.delete_input_file)}
-                onChange={(e) => setOptions({ delete_input_file: e.target.checked })}
-                className="w-4 h-4 accent-[#FF4D6D] cursor-pointer"
-              />
-            </label>
+                <input
+                  type="checkbox"
+                  checked={Boolean(options.delete_input_file)}
+                  onChange={(e) => setOptions({ delete_input_file: e.target.checked })}
+                  className="w-4 h-4 accent-[#FF4D6D] cursor-pointer"
+                />
+              </label>
+              {options.delete_input_file && (
+                <div
+                  role="alert"
+                  className="flex items-center gap-2 rounded-xl bg-[#FF4D6D]/15 border border-[#FF4D6D]/40 px-3.5 py-2 text-[11px] font-semibold text-[#FF4D6D]"
+                >
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>
+                    Safeguard active: Original source files will only be deleted after all output stems pass non-empty verification. Keep backups for irreplaceable recordings.
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* 3. AI Model Selector Card */}
@@ -584,17 +749,28 @@ export const SeparationScreen: React.FC = () => {
                         output_all_stems: m.id === "htdemucs_6s" ? true : options.output_all_stems,
                       })
                     }
-                    className={`text-left rounded-xl p-3.5 border transition-all ${
+                    className={`text-start rounded-xl p-3.5 border transition-all ${
                       selected
                         ? "bg-[#6C63FF]/20 border-[#6C63FF] text-white shadow-md shadow-[#6C63FF]/20"
                         : "bg-[#11131C] border-[#252B3D] text-slate-300 hover:border-slate-500"
                     }`}
                   >
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-2">
                       <span className="font-mono font-bold text-xs text-white">{m.id}</span>
-                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#00F0B5]/15 text-[#00F0B5] font-mono font-bold">
-                        {m.stems.length} stems • {m.relative_compute}x
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold ${
+                            m.cached
+                              ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                              : "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                          }`}
+                        >
+                          {m.cached ? "Offline Ready" : "1st-Run Auto-DL"}
+                        </span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#00F0B5]/15 text-[#00F0B5] font-mono font-bold">
+                          {m.stems.length} stems • {m.relative_compute}x
+                        </span>
+                      </div>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 line-clamp-1">
                       {m.display_name}
@@ -800,7 +976,7 @@ export const SeparationScreen: React.FC = () => {
             {/* Presets Bar */}
             <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#252B3D] text-xs">
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-slate-400 font-semibold mr-1">Saved Presets:</span>
+                <span className="text-slate-400 font-semibold me-1">Saved Presets:</span>
                 {presets.map((p) => (
                   <div key={p.name} className="inline-flex items-center rounded-lg bg-[#11131C] border border-[#252B3D]">
                     <button
@@ -813,7 +989,7 @@ export const SeparationScreen: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => deletePreset(p.name)}
-                      className="px-1.5 py-1 text-slate-500 hover:text-[#FF4D6D] border-l border-[#252B3D] transition"
+                      className="px-1.5 py-1 text-slate-500 hover:text-[#FF4D6D] border-s border-[#252B3D] transition"
                     >
                       ×
                     </button>
@@ -856,7 +1032,7 @@ export const SeparationScreen: React.FC = () => {
             <Play className="w-4 h-4 fill-current" />
             <span>
               {t.btn_start_separation} ({selectedFiles.length}{" "}
-              {selectedFiles.length === 1 ? "File" : "Files"} • {options.video_output_mode === "video_only" ? "Movie Remux" : options.output_format.toUpperCase()})
+              {selectedFiles.length === 1 ? "File" : "Files"} • {hasVideoFile && options.video_output_mode === "video_only" ? "Movie Remux" : options.output_format.toUpperCase()})
             </span>
           </button>
         </div>

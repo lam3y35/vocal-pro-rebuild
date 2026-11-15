@@ -28,7 +28,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeScreen, onSelectScreen }
   const setShowChangelogModal = useSystemStore((s) => s.setShowChangelogModal);
   const jobs = useJobsStore((s) => s.jobs);
 
-  const t = TRANSLATIONS[locale];
+  const t = TRANSLATIONS[locale] ?? TRANSLATIONS.en;
   const runningCount = jobs.filter(
     (j) => !["done", "cancelled", "failed"].includes(j.status)
   ).length;
@@ -47,12 +47,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeScreen, onSelectScreen }
   ];
 
   return (
-    <aside className="w-64 shrink-0 bg-[#11131C] border-r border-[#252B3D] flex flex-col justify-between p-4 select-none shadow-2xl z-20">
+    <aside className="w-64 shrink-0 bg-[#11131C] border-e border-[#252B3D] flex flex-col justify-between p-4 select-none shadow-2xl z-20">
       <div className="space-y-6">
         {/* Studio Brand Header */}
         <div className="flex items-center gap-3 px-2 py-1">
           <div className="h-11 w-11 rounded-2xl bg-gradient-to-tr from-[#6C63FF] via-[#7C66FF] to-[#00F0B5] flex items-center justify-center shadow-lg shadow-[#6C63FF]/30 ring-1 ring-white/20">
-            <AudioWaveform className="w-6 h-6 text-white drop-shadow-md" />
+            <AudioWaveform className="w-6 h-6 text-white keep-white drop-shadow-md" />
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
@@ -127,8 +127,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeScreen, onSelectScreen }
             <Cpu className="w-3 h-3 text-[#6C63FF] shrink-0" />
             <span className="truncate" title={health.last_error || undefined}>
               {health.running
-                ? `100% Offline • PyTorch ${health.torch_version}`
-                : (health.last_error ? `Error: ${health.last_error.slice(0, 35)}...` : "Run Start-VocalPro.bat or setup.bat")}
+                ? health.torch_version
+                  ? `100% Offline • PyTorch ${health.torch_version}`
+                  : "100% Offline • Engine Ready"
+                : (health.last_error ? `Error: ${health.last_error.slice(0, 35)}...` : "Warming up AI Engine...")}
             </span>
           </div>
         </div>

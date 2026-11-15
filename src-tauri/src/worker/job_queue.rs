@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +74,7 @@ pub struct JobRecord {
 pub struct JobQueue {
     jobs: HashMap<String, JobRecord>,
     order: Vec<String>,
+    waiting: HashSet<String>,
 }
 
 impl JobQueue {
@@ -132,12 +133,30 @@ impl JobQueue {
         if !self.jobs.contains_key(&job_id) {
             self.order.push(job_id.clone());
         }
+        self.waiting.insert(job_id.clone());
         self.jobs.insert(job_id, rec.clone());
         rec
     }
 
+    pub fn mark_waiting(&mut self, job_id: &str) {
+        if self.jobs.contains_key(job_id) {
+            self.waiting.insert(job_id.to_string());
+        }
+    }
+
     pub fn restore_records(&mut self, records: Vec<JobRecord>) {
-        for rec in records {
+        for mut rec in records {
+            if !rec.status.is_terminal() {
+                rec.status = JobStatus::Failed;
+                rec.phase = "failed".to_string();
+                rec.eta_s = None;
+                rec.error_code = Some("INTERRUPTED".to_string());
+                rec.error_message = Some(
+                    "Session interrupted before job completion. Click Retry to resume."
+                        .to_string(),
+                );
+                rec.message = "Interrupted on previous shutdown — ready to retry".to_string();
+            }
             if !self.jobs.contains_key(&rec.job_id) {
                 self.order.push(rec.job_id.clone());
             }
@@ -180,9 +199,23 @@ impl JobQueue {
     }
 
     pub fn assign_slot(&mut self, job_id: &str, slot_id: u32) {
+        self.waiting.remove(job_id);
         if let Some(rec) = self.jobs.get_mut(job_id) {
             rec.worker_slot = Some(slot_id);
         }
+    }
+
+    pub fn is_next_queued(&self, job_id: &str) -> bool {
+        self.order
+            .iter()
+            .filter_map(|id| self.jobs.get(id))
+            .find(|r| {
+                r.status == JobStatus::Queued
+                    && r.worker_slot.is_none()
+                    && self.waiting.contains(&r.job_id)
+            })
+            .map(|r| r.job_id == job_id)
+            .unwrap_or(true)
     }
 
     pub fn update_progress(
@@ -225,6 +258,7 @@ impl JobQueue {
         comparison_samples: Vec<String>,
         elapsed_s: f64,
     ) -> Option<JobRecord> {
+        self.waiting.remove(job_id);
         let rec = self.jobs.get_mut(job_id)?;
         rec.status = JobStatus::Done;
         rec.phase = "done".to_string();
@@ -239,7 +273,11 @@ impl JobQueue {
     }
 
     pub fn mark_cancelled(&mut self, job_id: &str) -> Option<JobRecord> {
+        self.waiting.remove(job_id);
         let rec = self.jobs.get_mut(job_id)?;
+        if rec.status.is_terminal() {
+            return Some(rec.clone());
+        }
         rec.status = JobStatus::Cancelled;
         rec.phase = "cancelled".to_string();
         rec.message = "Cancelled by user".to_string();
@@ -252,6 +290,7 @@ impl JobQueue {
         code: String,
         message: String,
     ) -> Option<JobRecord> {
+        self.waiting.remove(job_id);
         let rec = self.jobs.get_mut(job_id)?;
         rec.status = JobStatus::Failed;
         rec.phase = "failed".to_string();
