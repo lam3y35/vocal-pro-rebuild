@@ -9,17 +9,25 @@ import threading
 from typing import Any, BinaryIO
 
 
+def isolate_stdout_fd() -> int:
+    """Duplicate original stdout fd (1) and redirect fd 1 -> stderr (2) so library prints never corrupt JSON-Lines."""
+    proto_fd = os.dup(1)
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    return proto_fd
+
+
 class StdioProtocol:
     """Manages isolated JSON-Lines framing over original stdout while redirecting fd 1 -> stderr."""
 
-    def __init__(self, isolate_fd: bool = True) -> None:
+    def __init__(self, isolate_fd: bool = True, proto_fd: int | None = None) -> None:
         self._write_lock = threading.Lock()
-        if isolate_fd:
-            # Duplicate original stdout fd so even C/C++ stdout writes to fd 1 go to stderr (fd 2)
-            proto_fd = os.dup(1)
-            os.dup2(2, 1)
-            sys.stdout = sys.stderr
+        if proto_fd is not None:
             self._out: BinaryIO = os.fdopen(proto_fd, "wb", buffering=0)
+        elif isolate_fd:
+            # Duplicate original stdout fd so even C/C++ stdout writes to fd 1 go to stderr (fd 2)
+            dup_fd = isolate_stdout_fd()
+            self._out = os.fdopen(dup_fd, "wb", buffering=0)
         else:
             self._out = sys.stdout.buffer
 

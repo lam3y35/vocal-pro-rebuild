@@ -16,6 +16,7 @@ import {
   Pause,
   Play,
   Plus,
+  RefreshCw,
   Sliders,
   Sparkles,
   Terminal,
@@ -26,12 +27,19 @@ import { DeviceOption, ModelName, OutputFormat, OutputMode, VideoOutputMode } fr
 import { CanvasWaveform } from "../components/CanvasWaveform";
 import { JobQueueBar } from "../components/JobQueueBar";
 import { TRANSLATIONS } from "../i18n/translations";
-import { invokeCommand, isTauriRuntime, toAssetUrl } from "../ipc";
+import { invokeCommandStrict, isTauriRuntime, toAssetUrl } from "../ipc";
 import { useJobsStore, useLibraryStore, useSystemStore } from "../state/appStores";
+
+function normalizeFilePathKey(p: string): string {
+  return p.trim().replace(/\\/g, "/").toLowerCase();
+}
 
 export const SeparationScreen: React.FC = () => {
   const locale = useSystemStore((s) => s.locale);
   const models = useSystemStore((s) => s.models);
+  const health = useSystemStore((s) => s.health);
+  const restartWorker = useSystemStore((s) => s.restartWorker);
+  const showBanner = useSystemStore((s) => s.showBanner);
   const t = TRANSLATIONS[locale] ?? TRANSLATIONS.en;
 
   const selectedFiles = useJobsStore((s) => s.selectedFiles);
@@ -69,10 +77,20 @@ export const SeparationScreen: React.FC = () => {
   const [showAdvancedDsp, setShowAdvancedDsp] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const queueTopRef = useRef<HTMLDivElement | null>(null);
 
   const primaryInputFile = selectedFiles[0] || "";
   const hasVideoFile = selectedFiles.some((f) => /\.(mp4|mkv|avi|mov|webm|flv|wmv)$/i.test(f));
   const effectivePreviewDur = previewMetaDurationSec || previewDurationSec || 0;
+  const activeRunningJobs = jobs.filter(
+    (j) => j.status !== "done" && j.status !== "failed" && j.status !== "cancelled"
+  );
+
+  const handleStartSeparation = () => {
+    if (selectedFiles.length === 0) return;
+    queueTopRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    void startSeparationBatch();
+  };
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -101,7 +119,12 @@ export const SeparationScreen: React.FC = () => {
           unlisten = fn;
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.error("Failed to bind native drag-and-drop listener:", err);
+        useSystemStore
+          .getState()
+          .showBanner(`Drag-and-drop listener error: ${err?.message || String(err)}`, "warning");
+      });
     return () => {
       cancelled = true;
       unlisten?.();
@@ -191,12 +214,13 @@ export const SeparationScreen: React.FC = () => {
   const handleBrowse = async () => {
     if (isTauriRuntime()) {
       try {
-        const picked = await invokeCommand<string[]>("pick_audio_files");
+        const picked = await invokeCommandStrict<string[]>("pick_audio_files");
         if (picked && Array.isArray(picked) && picked.length > 0) {
           addFiles(picked);
         }
-      } catch (e) {
+      } catch (e: any) {
         console.warn("pick_audio_files failed:", e);
+        showBanner(`Could not open file picker: ${e?.message || String(e)}`, "error");
       }
       return;
     }
@@ -239,9 +263,35 @@ export const SeparationScreen: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6 pb-12">
+    <div ref={queueTopRef} className="space-y-6 pb-12">
       {/* Multi-Job Tab Strip & Live Progress Bar */}
       <JobQueueBar />
+
+      {/* Explicit AI Worker Error Card when backend engine failed to start */}
+      {isTauriRuntime() && !health.running && health.last_error && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-[#FF4D6D]/15 border border-[#FF4D6D]/50 p-4 flex flex-wrap items-center justify-between gap-3 text-xs"
+        >
+          <div className="flex items-start gap-2.5 min-w-0 flex-1">
+            <AlertTriangle className="w-4 h-4 text-[#FF4D6D] shrink-0 mt-0.5" />
+            <div className="min-w-0 space-y-0.5">
+              <div className="font-bold text-[#FF4D6D]">AI Separation Worker Offline</div>
+              <div className="text-slate-200 font-mono text-[11px] break-words">
+                {health.last_error}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void restartWorker()}
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FF4D6D] hover:bg-[#FF4D6D]/90 text-white font-bold text-xs shrink-0 transition"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Restart AI Worker</span>
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         {/* Left Column: Input Files + Waveform + URL Downloader + Live Logs */}
@@ -363,11 +413,28 @@ export const SeparationScreen: React.FC = () => {
                 <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
                   {selectedFiles.map((filePath) => {
                     const isVideo = /\.(mp4|mkv|avi|mov|webm|flv|wmv)$/i.test(filePath);
-                    const matchingJob = jobs.find((j) => j.input_path === filePath);
+                    const normFile = normalizeFilePathKey(filePath);
+                    const matchingJob = jobs.find(
+                      (j) =>
+                        j.input_path === filePath ||
+                        normalizeFilePathKey(j.input_path) === normFile
+                    );
+                    const badgeClass =
+                      matchingJob?.status === "done"
+                        ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                        : matchingJob?.status === "failed"
+                        ? "bg-[#FF4D6D]/15 text-[#FF4D6D] border-[#FF4D6D]/40"
+                        : matchingJob?.status === "cancelled"
+                        ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                        : "bg-[#00F0B5]/15 text-[#00F0B5] border-[#00F0B5]/30";
                     return (
                       <div
                         key={filePath}
-                        className="rounded-xl bg-[#11131C] border border-[#252B3D] p-3 space-y-2 hover:border-[#6C63FF]/50 transition"
+                        className={`rounded-xl bg-[#11131C] border p-3 space-y-2 transition ${
+                          matchingJob?.status === "failed"
+                            ? "border-[#FF4D6D]/50"
+                            : "border-[#252B3D] hover:border-[#6C63FF]/50"
+                        }`}
                       >
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-2.5 min-w-0">
@@ -381,9 +448,24 @@ export const SeparationScreen: React.FC = () => {
                               </span>
                             )}
                             <div className="min-w-0">
-                              <span className="text-xs text-slate-100 font-semibold truncate block">
-                                {filePath.split(/[\\/]/).pop()}
-                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-slate-100 font-semibold truncate block">
+                                  {filePath.split(/[\\/]/).pop()}
+                                </span>
+                                {matchingJob && (
+                                  <span
+                                    className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-full border shrink-0 ${badgeClass}`}
+                                  >
+                                    {matchingJob.status === "done"
+                                      ? "Done"
+                                      : matchingJob.status === "failed"
+                                      ? "Failed"
+                                      : matchingJob.status === "cancelled"
+                                      ? "Cancelled"
+                                      : `${Math.round(matchingJob.percent)}%`}
+                                  </span>
+                                )}
+                              </div>
                               <span className="text-[10px] text-slate-400 font-mono truncate block">
                                 {filePath}
                               </span>
@@ -399,11 +481,30 @@ export const SeparationScreen: React.FC = () => {
                           </button>
                         </div>
                         {matchingJob && (
-                          <div className="w-full h-1.5 rounded-full bg-[#171A26] overflow-hidden">
-                            <div
-                              className="h-full bg-[#00F0B5] transition-all duration-200"
-                              style={{ width: `${matchingJob.percent}%` }}
-                            />
+                          <div className="space-y-1">
+                            <div className="w-full h-1.5 rounded-full bg-[#171A26] overflow-hidden">
+                              <div
+                                className={`h-full transition-all duration-200 ${
+                                  matchingJob.status === "failed"
+                                    ? "bg-[#FF4D6D]"
+                                    : matchingJob.status === "cancelled"
+                                    ? "bg-[#FFB020]"
+                                    : "bg-[#00F0B5]"
+                                }`}
+                                style={{
+                                  width: `${
+                                    matchingJob.status === "failed"
+                                      ? 100
+                                      : Math.max(0, Math.min(100, matchingJob.percent))
+                                  }%`,
+                                }}
+                              />
+                            </div>
+                            {matchingJob.status === "failed" && matchingJob.error_message && (
+                              <div className="text-[10px] text-[#FF4D6D] font-mono break-words">
+                                {matchingJob.error_message}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -662,10 +763,10 @@ export const SeparationScreen: React.FC = () => {
                   onChange={(e) => setOptions({ output_format: e.target.value as OutputFormat })}
                   className="w-full bg-[#11131C] border border-[#252B3D] rounded-xl px-3 py-2 text-slate-100 font-mono text-xs focus:border-[#6C63FF] focus:outline-none"
                 >
-                  <option value="mp3">MP3 320k (Studio Quality ~5-7 MB) — Recommended</option>
+                  <option value="mp3">MP3 320k (Studio Quality ~5-7 MB)</option>
                   <option value="aac">AAC 320k (Cinema Master ~5-7 MB)</option>
                   <option value="flac">FLAC (24-bit Lossless ~18 MB)</option>
-                  <option value="wav">WAV (16-bit Master ~35 MB)</option>
+                  <option value="wav">WAV (24-bit Studio Master Lossless) — Max Default</option>
                 </select>
               </label>
 
@@ -812,15 +913,15 @@ export const SeparationScreen: React.FC = () => {
 
               <label className="space-y-1.5">
                 <div className="flex justify-between text-slate-300">
-                  <span className="font-medium">Segment ({options.segment ?? 6}s)</span>
-                  <span className="text-[10px] text-slate-500">Chunk Size</span>
+                  <span className="font-medium">Segment ({options.segment ?? 7.8}s)</span>
+                  <span className="text-[10px] text-slate-500">Max 7.8s</span>
                 </div>
                 <input
                   type="range"
                   min={2}
-                  max={30}
-                  step={1}
-                  value={options.segment ?? 6}
+                  max={7.8}
+                  step={0.2}
+                  value={Math.min(7.8, options.segment ?? 7.8)}
                   onChange={(e) => setOptions({ segment: parseFloat(e.target.value) })}
                   className="w-full"
                 />
@@ -954,8 +1055,12 @@ export const SeparationScreen: React.FC = () => {
                 <button
                   type="button"
                   onClick={async () => {
-                    const picked = await invokeCommand<string | null>("pick_output_dir");
-                    if (picked) setCustomOutputDir(picked);
+                    try {
+                      const picked = await invokeCommandStrict<string | null>("pick_output_dir");
+                      if (picked) setCustomOutputDir(picked);
+                    } catch (err: any) {
+                      showBanner(`Could not open folder picker: ${err?.message || String(err)}`, "error");
+                    }
                   }}
                   className="px-3 py-1.5 rounded-xl bg-[#11131C] border border-[#252B3D] hover:border-[#6C63FF] text-slate-200 text-xs font-semibold transition"
                 >
@@ -1022,10 +1127,25 @@ export const SeparationScreen: React.FC = () => {
             </div>
           </div>
 
+          {/* Live active job status right beside the Start button */}
+          {activeRunningJobs.length > 0 && (
+            <div className="rounded-xl bg-[#11131C] border border-[#00F0B5]/40 px-4 py-2.5 flex items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="w-2 h-2 rounded-full bg-[#00F0B5] animate-pulse shrink-0" />
+                <span className="text-slate-200 font-semibold truncate">
+                  {activeRunningJobs[0].message || "Separating stems..."}
+                </span>
+              </div>
+              <span className="font-mono font-bold text-[#00F0B5] shrink-0">
+                {Math.round(activeRunningJobs[0].percent)}% ({activeRunningJobs.length} active)
+              </span>
+            </div>
+          )}
+
           {/* Primary Start Separation CTA */}
           <button
             type="button"
-            onClick={startSeparationBatch}
+            onClick={handleStartSeparation}
             disabled={selectedFiles.length === 0}
             className="w-full py-4 rounded-2xl bg-gradient-to-r from-[#6C63FF] via-[#7C66FF] to-[#00F0B5] text-slate-950 font-black text-sm tracking-wide shadow-xl shadow-[#6C63FF]/30 hover:opacity-95 hover:shadow-2xl hover:scale-[1.005] active:scale-[0.995] disabled:opacity-35 disabled:hover:scale-100 disabled:shadow-none flex items-center justify-center gap-2.5 transition-all duration-200"
           >

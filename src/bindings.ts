@@ -79,6 +79,9 @@ export interface JobOptions {
   enable_loudness_normalize: boolean;
   auto_oom_fallback: boolean;
   fp16_inference?: boolean;
+  hardware_profile_mode?: string;
+  naming_template?: string;
+  conflict_policy?: "append_number" | "overwrite" | "skip";
 }
 
 export interface StemOutput {
@@ -265,20 +268,20 @@ export interface ChangelogRelease {
 }
 
 export const DEFAULT_JOB_OPTIONS: JobOptions = {
-  model: "htdemucs",
-  output_mode: "vocals",
-  output_format: "mp3",
+  model: "htdemucs_ft",
+  output_mode: "all_stems",
+  output_format: "wav",
   audio_bitrate: "320k",
-  output_all_stems: false,
+  output_all_stems: true,
   device: "auto",
   shifts: 1,
   overlap: 0.25,
   segment: 7.8,
-  large_file_threshold_minutes: 15,
-  chunk_duration_minutes: 10,
+  large_file_threshold_minutes: 30,
+  chunk_duration_minutes: 15,
   overlap_seconds: 5,
-  output_video: false,
-  video_output_mode: "audio_only",
+  output_video: true,
+  video_output_mode: "both",
   delete_input_file: false,
   ffmpeg_faststart: true,
   ffmpeg_path: "",
@@ -292,13 +295,13 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
   gate_floor_db: -60.0,
   denoise_strength: 0.55,
   min_vocal_duration: 0.08,
-  enable_multiband_denoise: false,
+  enable_multiband_denoise: true,
   denoise_band_split_hz: [250.0, 6000.0],
   denoise_strength_low: 0.35,
   denoise_strength_mid: 0.1,
   denoise_strength_high: 0.25,
-  enable_noise_profile: false,
-  adaptive_gate_floor: false,
+  enable_noise_profile: true,
+  adaptive_gate_floor: true,
   enable_sfx_separation: false,
   sfx_separation_margin_db: 5.0,
   sfx_kernel_size: 15,
@@ -310,10 +313,13 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
   safe_mode: false,
   max_threads: 0,
   cooldown_between_chunks_seconds: 0.0,
-  wav_bit_depth: "PCM_16",
+  wav_bit_depth: "PCM_24",
   enable_hf_restore: true,
   hf_boost_db: 3.0,
   enable_loudness_normalize: true,
   auto_oom_fallback: true,
-  fp16_inference: false,
+  fp16_inference: true,
+  hardware_profile_mode: "max_quality",
+  naming_template: "{track}_{stem}",
+  conflict_policy: "overwrite",
 };

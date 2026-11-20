@@ -79,6 +79,7 @@ if not exist "dist\bundle\models\*.th" (
     echo [*] Pre-caching default Demucs model weights...
     set "PYTHONPATH=%ROOT_DIR%\worker"
     "%APPDATA%\VocalPro\engine\venv\Scripts\python.exe" -m vocalpro_worker.model_installer htdemucs --target dist\bundle\models
+    "%APPDATA%\VocalPro\engine\venv\Scripts\python.exe" -m vocalpro_worker.model_installer htdemucs_ft --target dist\bundle\models
 )
 
 :: 5. Compile Inno Setup Single Installer

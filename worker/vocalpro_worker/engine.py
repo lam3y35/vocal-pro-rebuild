@@ -233,7 +233,11 @@ def resolve_ffmpeg(custom_path: str = "") -> str:
     return "ffmpeg"
 
 
-def load_demucs_model(model_name: str, device: torch.device) -> Any:
+def load_demucs_model(
+    model_name: str,
+    device: torch.device,
+    download_progress_cb: Optional[Callable[[int, Optional[int], str], None]] = None,
+) -> Any:
     """Load and cache a Demucs model (or compact HTDemucs in offline test mode)."""
     cache_key = f"{model_name}:{device.type}"
     with _CACHE_LOCK:
@@ -274,12 +278,38 @@ def load_demucs_model(model_name: str, device: torch.device) -> Any:
         hub_dir = _resolve_local_models_hub_dir()
         if hub_dir is not None:
             torch.hub.set_dir(str(hub_dir))
+
+        # If a download progress callback is supplied and any weight file is missing locally,
+        # download via model_installer with live progress reporting so UI never looks frozen.
+        if download_progress_cb is not None:
+            from . import model_installer
+
+            ckpt_dir = Path(torch.hub.get_dir()) / "checkpoints"
+            files = model_installer.model_files(model_name)
+            missing = [(fname, url) for fname, url in files if not (ckpt_dir / fname).is_file()]
+            if missing:
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                last_emit_t = 0.0
+                for idx, (fname, url) in enumerate(missing, start=1):
+                    label = f"{model_name} ({idx}/{len(missing)})"
+
+                    def _on_dl(written: int, total: Optional[int], _lbl: str = label) -> None:
+                        nonlocal last_emit_t
+                        now = time.perf_counter()
+                        if now - last_emit_t >= 0.25 or (total is not None and written >= total):
+                            last_emit_t = now
+                            download_progress_cb(written, total, _lbl)
+
+                    model_installer.download_verified(url, ckpt_dir / fname, progress=_on_dl, timeout=60.0)
+
         model = get_model(model_name)
         model.to(device)
         model.eval()
         with _CACHE_LOCK:
             MODEL_CACHE[cache_key] = model
         return model
+    except WorkerEngineError:
+        raise
     except Exception as exc:
         err_str = str(exc).lower()
         code = (
@@ -309,20 +339,29 @@ def decode_audio_stereo_44k(input_path: Path, ffmpeg_bin: str = "ffmpeg") -> tup
                 raise WorkerEngineError("DECODE_FAILED", f"Decoded 0 frames from {input_path}")
             orig_duration = float(data.shape[0]) / float(sr)
             # Convert to (channels, samples)
-            ch_data = data.T
+            ch_data = np.ascontiguousarray(data.T, dtype=np.float32)
             if ch_data.shape[0] == 1:
                 ch_data = np.vstack([ch_data, ch_data])
             elif ch_data.shape[0] > 2:
                 ch_data = ch_data[:2]
             if sr != 44100:
-                import librosa
+                try:
+                    import torchaudio
 
-                ch_data = librosa.resample(ch_data, orig_sr=sr, target_sr=44100)
+                    with torch.inference_mode():
+                        t_in = torch.from_numpy(ch_data)
+                        t_out = torchaudio.functional.resample(t_in, orig_freq=int(sr), new_freq=44100)
+                        ch_data = t_out.numpy()
+                except ImportError:
+                    import librosa
+
+                    ch_data = librosa.resample(ch_data, orig_sr=sr, target_sr=44100)
             return ch_data.astype(np.float32), orig_duration
         except WorkerEngineError:
             raise
-        except Exception:
-            pass
+        except Exception as sf_exc:
+            # Non-soundfile codecs (e.g. m4a/aac/opus/wma) fall through to FFmpeg extraction
+            print(f"[engine] soundfile decode fallback to FFmpeg for {input_path.name}: {sf_exc}", file=sys.stderr)
 
     # Fallback / video extraction via ffmpeg to temporary 44.1kHz stereo float32 WAV
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -749,14 +788,20 @@ def run_separation_job(
     hw_profile = apply_runtime_hardware_tuning(opts)
 
     req_device = str(opts.get("device", "auto")).lower()
+    mps_ok = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
     if req_device == "cuda" and torch.cuda.is_available():
         device = torch.device("cuda")
     elif req_device == "auto" and torch.cuda.is_available():
         device = torch.device("cuda")
+    elif req_device == "auto" and mps_ok:
+        device = torch.device("mps")
     else:
         device = torch.device("cpu")
 
-    model_name = str(opts.get("model") or "htdemucs")
+    if device.type == "cpu" and hw_profile.non_cuda_gpu_note:
+        emit_event({"v": 1, "event": "log", "level": "warn", "message": hw_profile.non_cuda_gpu_note})
+
+    model_name = str(opts.get("model") or "htdemucs_ft")
     ensemble_mode = bool(opts.get("ensemble_mode", False))
     ffmpeg_bin = resolve_ffmpeg(str(opts.get("ffmpeg_path") or ""))
 
@@ -786,17 +831,39 @@ def run_separation_job(
             }
         )
 
+    def _on_model_download(written: int, total: Optional[int], label: str) -> None:
+        if cancel_event.is_set():
+            raise JobCancelledError()
+        mb_done = written / (1024 * 1024)
+        if total and total > 0:
+            mb_tot = total / (1024 * 1024)
+            pct = 2.0 + 4.0 * min(1.0, written / total)
+            msg = f"Downloading {label}: {mb_done:.1f} / {mb_tot:.1f} MB ({int(min(100, written * 100 / total))}%)"
+        else:
+            pct = 3.5
+            msg = f"Downloading {label}: {mb_done:.1f} MB..."
+        send_progress("loading_model", pct, message=msg)
+
     # Phase 1: Load model
+    accel_label = (
+        f"CUDA ({hw_profile.gpu_name or 'GPU'})"
+        if device.type == "cuda"
+        else ("Apple MPS GPU" if device.type == "mps" else f"CPU ({torch.get_num_threads()} threads)")
+    )
     send_progress(
         "loading_model",
         2.0,
-        message=f"Loading model {model_name} on {device.type.upper()} ({hw_profile.tier_label})...",
+        message=f"Loading model {model_name} on {accel_label}...",
     )
     if cancel_event.is_set():
         raise JobCancelledError()
 
-    primary_model = load_demucs_model("htdemucs_ft" if ensemble_mode else model_name, device)
-    secondary_model = load_demucs_model("mdx_extra", device) if ensemble_mode else None
+    _THREAD_CTX.download_progress_cb = _on_model_download
+    try:
+        primary_model = load_demucs_model("htdemucs_ft" if ensemble_mode else model_name, device)
+        secondary_model = load_demucs_model("mdx_extra", device) if ensemble_mode else None
+    finally:
+        _THREAD_CTX.download_progress_cb = None
 
     # Phase 2: Decode input
     send_progress("decoding", 6.0, message=f"Decoding {input_path.name}...")
@@ -1039,22 +1106,49 @@ def run_separation_job(
 
     # Phase 5: Write output stems once (fixes P-05, P-07, P-17)
     send_progress("writing", 95.0, message="Writing output stems...")
-    output_format = str(opts.get("output_format") or "mp3").lower().lstrip(".")
+    output_format = str(opts.get("output_format") or "wav").lower().lstrip(".")
     audio_bitrate = str(opts.get("audio_bitrate") or "320k")
-    wav_bit_depth = str(opts.get("wav_bit_depth") or "PCM_16")
+    wav_bit_depth = str(opts.get("wav_bit_depth") or "PCM_24")
     output_mode = str(opts.get("output_mode") or "vocals").lower()
+    naming_template = str(opts.get("naming_template") or "{track}_{stem}").strip() or "{track}_{stem}"
+    conflict_policy = str(opts.get("conflict_policy") or "overwrite").lower()
     save_all_stems = (
         bool(opts.get("output_all_stems", False))
         or output_mode == "all_stems"
         or model_name == "htdemucs_6s"
     )
 
+    def _resolve_stem_target(stem_label: str, ext: str) -> tuple[Path, bool]:
+        rendered = (
+            naming_template.replace("{track_name}", base_name)
+            .replace("{track}", base_name)
+            .replace("{stem}", stem_label)
+            .replace("{model}", model_name)
+        )
+        # Prevent path traversal in user-supplied naming templates
+        safe_name = "".join("_" if c in '/\\:*?"<>|' else c for c in rendered).strip(" .")
+        if not safe_name:
+            safe_name = f"{base_name}_{stem_label}"
+        candidate = output_dir / f"{safe_name}.{ext}"
+        if candidate.exists():
+            if conflict_policy == "skip":
+                return candidate, False
+            if conflict_policy == "append_number":
+                idx = 1
+                while True:
+                    alt = output_dir / f"{safe_name}_{idx}.{ext}"
+                    if not alt.exists():
+                        return alt, True
+                    idx += 1
+        return candidate, True
+
     written_stems: list[dict[str, Any]] = []
     duration_final_s = round(float(target_samples) / float(sr), 3)
 
     # 1. Primary Vocals stem
-    vocals_path = output_dir / f"{base_name}_vocals.{output_format}"
-    write_encoded_stem(vocals_clean, sr, vocals_path, output_format, audio_bitrate, ffmpeg_bin, wav_bit_depth)
+    vocals_path, should_write = _resolve_stem_target("vocals", output_format)
+    if should_write:
+        write_encoded_stem(vocals_clean, sr, vocals_path, output_format, audio_bitrate, ffmpeg_bin, wav_bit_depth)
     written_stems.append(
         {
             "name": "vocals",
@@ -1071,8 +1165,9 @@ def run_separation_job(
         k_peak = float(np.max(np.abs(karaoke_arr)))
         if k_peak > 1.0:
             karaoke_arr = karaoke_arr / k_peak * 0.99
-        karaoke_path = output_dir / f"{base_name}_karaoke.{output_format}"
-        write_encoded_stem(karaoke_arr, sr, karaoke_path, output_format, audio_bitrate, ffmpeg_bin, wav_bit_depth)
+        karaoke_path, should_write = _resolve_stem_target("karaoke", output_format)
+        if should_write:
+            write_encoded_stem(karaoke_arr, sr, karaoke_path, output_format, audio_bitrate, ffmpeg_bin, wav_bit_depth)
         written_stems.append(
             {
                 "name": "karaoke",
@@ -1093,8 +1188,9 @@ def run_separation_job(
         bg_peak = float(np.max(np.abs(bg_arr)))
         if bg_peak > 1.0:
             bg_arr = bg_arr / bg_peak * 0.99
-        bg_path = output_dir / f"{base_name}_background.{output_format}"
-        write_encoded_stem(bg_arr, sr, bg_path, output_format, audio_bitrate, ffmpeg_bin, wav_bit_depth)
+        bg_path, should_write = _resolve_stem_target("background", output_format)
+        if should_write:
+            write_encoded_stem(bg_arr, sr, bg_path, output_format, audio_bitrate, ffmpeg_bin, wav_bit_depth)
         written_stems.append(
             {
                 "name": "background",
@@ -1112,8 +1208,9 @@ def run_separation_job(
             s_peak = float(np.max(np.abs(stem_arr)))
             if s_peak > 1.0:
                 stem_arr = stem_arr / s_peak * 0.99
-            stem_path = output_dir / f"{base_name}_{stem_key}.{output_format}"
-            write_encoded_stem(stem_arr, sr, stem_path, output_format, audio_bitrate, ffmpeg_bin, wav_bit_depth)
+            stem_path, should_write = _resolve_stem_target(stem_key, output_format)
+            if should_write:
+                write_encoded_stem(stem_arr, sr, stem_path, output_format, audio_bitrate, ffmpeg_bin, wav_bit_depth)
             written_stems.append(
                 {
                     "name": stem_key,
@@ -1308,8 +1405,15 @@ def run_separation_job(
             )
             if outputs_verified and input_path.exists():
                 input_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except OSError as del_exc:
+            emit_event(
+                {
+                    "v": 1,
+                    "event": "log",
+                    "level": "warn",
+                    "message": f"Could not delete original input file {input_path}: {del_exc}",
+                }
+            )
 
     send_progress("writing", 100.0, 1, 1, 1, 1, 0.0, "Separation complete")
     elapsed_s = round(time.perf_counter() - t_job_start, 3)

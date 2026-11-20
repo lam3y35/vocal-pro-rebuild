@@ -97,35 +97,45 @@ pub struct JobOptions {
     pub enable_loudness_normalize: bool,
     #[serde(default = "default_true")]
     pub auto_oom_fallback: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub fp16_inference: bool,
     #[serde(default = "default_profile_mode")]
     pub hardware_profile_mode: String,
+    #[serde(default = "default_naming_template")]
+    pub naming_template: String,
+    #[serde(default = "default_conflict_policy")]
+    pub conflict_policy: String,
 }
 
 fn default_true() -> bool {
     true
 }
 fn default_wav_bit_depth() -> String {
-    "PCM_16".to_string()
+    "PCM_24".to_string()
 }
 fn default_profile_mode() -> String {
-    "auto".to_string()
+    "max_quality".to_string()
+}
+fn default_naming_template() -> String {
+    "{track}_{stem}".to_string()
+}
+fn default_conflict_policy() -> String {
+    "overwrite".to_string()
 }
 fn default_hf_boost() -> f64 {
     3.0
 }
 fn default_large_threshold() -> f64 {
-    15.0
+    30.0
 }
 fn default_chunk_duration() -> f64 {
-    12.0
+    15.0
 }
 fn default_overlap_seconds() -> f64 {
     5.0
 }
 fn default_video_mode() -> String {
-    "video_only".to_string()
+    "both".to_string()
 }
 fn default_gate_threshold() -> f64 {
     -55.0
@@ -167,20 +177,20 @@ fn default_sfx_perc() -> f64 {
 impl Default for JobOptions {
     fn default() -> Self {
         Self {
-            model: "htdemucs".to_string(),
-            output_mode: "vocals".to_string(),
-            output_format: "mp3".to_string(),
+            model: "htdemucs_ft".to_string(),
+            output_mode: "all_stems".to_string(),
+            output_format: "wav".to_string(),
             audio_bitrate: "320k".to_string(),
-            output_all_stems: false,
+            output_all_stems: true,
             device: "auto".to_string(),
             shifts: 1,
             overlap: 0.25,
             segment: Some(7.8),
-            large_file_threshold_minutes: 15.0,
-            chunk_duration_minutes: 10.0,
+            large_file_threshold_minutes: 30.0,
+            chunk_duration_minutes: 15.0,
             overlap_seconds: 5.0,
             output_video: true,
-            video_output_mode: "video_only".to_string(),
+            video_output_mode: "both".to_string(),
             delete_input_file: false,
             ffmpeg_faststart: true,
             ffmpeg_path: String::new(),
@@ -194,13 +204,13 @@ impl Default for JobOptions {
             gate_floor_db: -60.0,
             denoise_strength: 0.55,
             min_vocal_duration: 0.08,
-            enable_multiband_denoise: false,
+            enable_multiband_denoise: true,
             denoise_band_split_hz: [250.0, 6000.0],
             denoise_strength_low: 0.35,
             denoise_strength_mid: 0.10,
             denoise_strength_high: 0.25,
-            enable_noise_profile: false,
-            adaptive_gate_floor: false,
+            enable_noise_profile: true,
+            adaptive_gate_floor: true,
             enable_sfx_separation: false,
             sfx_separation_margin_db: 5.0,
             sfx_kernel_size: 15,
@@ -212,13 +222,15 @@ impl Default for JobOptions {
             safe_mode: false,
             max_threads: 0,
             cooldown_between_chunks_seconds: 0.0,
-            wav_bit_depth: "PCM_16".to_string(),
+            wav_bit_depth: "PCM_24".to_string(),
             enable_hf_restore: true,
             hf_boost_db: 3.0,
             enable_loudness_normalize: true,
             auto_oom_fallback: true,
             fp16_inference: true,
             hardware_profile_mode: "max_quality".to_string(),
+            naming_template: "{track}_{stem}".to_string(),
+            conflict_policy: "overwrite".to_string(),
         }
     }
 }

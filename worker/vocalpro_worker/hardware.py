@@ -578,11 +578,19 @@ def classify_and_build_profile(
     )
 
 
+_HW_PROFILE_CACHE: dict[str, HardwareProfile] = {}
+
+
 def detect_hardware_profile(
     target_dir: Optional[Path] = None,
     profile_mode: str = "auto",
+    force_refresh: bool = False,
 ) -> HardwareProfile:
     """Inspect CPU, RAM, Disk, Battery, and GPU hardware and compute an optimized device configuration."""
+    cache_key = f"{str(target_dir) if target_dir else ''}:{(profile_mode or 'auto').lower()}"
+    if not force_refresh and cache_key in _HW_PROFILE_CACHE:
+        return _HW_PROFILE_CACHE[cache_key]
+
     cpu_model, physical_cores, simd_features = _detect_cpu_model_and_simd()
     logical_cores = os.cpu_count() or 4
     total_ram_mb, available_ram_mb = _detect_memory_mb()
@@ -591,7 +599,7 @@ def detect_hardware_profile(
     try:
         usage = shutil.disk_usage(str(check_path))
         disk_free_gb = round(usage.free / (1024.0**3), 2)
-    except Exception:
+    except OSError:
         disk_free_gb = 50.0
 
     temp_speed = _measure_temp_drive_speed_mbps(check_path)
@@ -607,7 +615,7 @@ def detect_hardware_profile(
         fp16_supported,
     ) = _detect_gpu_details()
 
-    return classify_and_build_profile(
+    prof = classify_and_build_profile(
         os_name=platform.system(),
         os_version=platform.release(),
         os_arch=platform.machine(),
@@ -632,6 +640,8 @@ def detect_hardware_profile(
         fp16_supported=fp16_supported,
         profile_mode=profile_mode,
     )
+    _HW_PROFILE_CACHE[cache_key] = prof
+    return prof
 
 
 def get_process_rss_mb() -> int:
@@ -817,29 +827,27 @@ def apply_runtime_hardware_tuning(
     opts: dict[str, Any],
     profile: Optional[HardwareProfile] = None,
 ) -> HardwareProfile:
-    """Configure PyTorch threads, matmul precision, and cuDNN flags for the current process."""
-    profile_mode = str(opts.get("hardware_profile_mode") or "auto")
+    """Configure PyTorch threads, matmul precision, and cuDNN/TF32 flags for the current process."""
+    profile_mode = str(opts.get("hardware_profile_mode") or "max_quality")
     prof = profile or detect_hardware_profile(profile_mode=profile_mode)
 
     max_threads = int(opts.get("max_threads") or 0)
     if max_threads <= 0:
         max_threads = prof.recommended_threads_per_job
 
-    try:
-        torch.set_num_threads(max(1, max_threads))
-    except Exception:
-        pass
+    target_threads = max(1, max_threads)
+    if torch.get_num_threads() != target_threads:
+        torch.set_num_threads(target_threads)
 
     if hasattr(torch, "set_float32_matmul_precision"):
-        try:
-            torch.set_float32_matmul_precision("high")
-        except Exception:
-            pass
+        torch.set_float32_matmul_precision("high")
 
-    if prof.cuda_available and hasattr(torch.backends, "cudnn"):
-        try:
+    if prof.cuda_available:
+        if hasattr(torch.backends, "cudnn"):
             torch.backends.cudnn.benchmark = True
-        except Exception:
-            pass
+            if hasattr(torch.backends.cudnn, "allow_tf32"):
+                torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = True
 
     return prof

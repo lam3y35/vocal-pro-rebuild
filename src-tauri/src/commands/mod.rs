@@ -845,6 +845,59 @@ impl AppContext {
         Ok(self.list_models())
     }
 
+    pub fn enable_cuda_engine(&self) -> AppResult<WorkerHealth> {
+        // Stop existing worker processes before upgrading torch/torchaudio wheels so Windows DLLs aren't locked.
+        self.worker.shutdown();
+
+        let mut cmd = std::process::Command::new(self.worker.python_bin());
+        silent_command(&mut cmd);
+        cmd.args([
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--force-reinstall",
+            "--timeout",
+            "120",
+            "--retries",
+            "5",
+            "torch",
+            "torchaudio",
+            "--index-url",
+            "https://download.pytorch.org/whl/cu124",
+            "--no-warn-script-location",
+        ])
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8");
+
+        let output = cmd.output().map_err(|e| {
+            AppError::System(format!("Failed to launch pip for CUDA GPU upgrade: {}", e))
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            let _ = self.worker.start();
+            return Err(AppError::System(format!(
+                "CUDA PyTorch installation failed: {}",
+                detail
+            )));
+        }
+
+        let health = self.worker.start()?;
+        if !health.cuda_available {
+            return Err(AppError::System(
+                "CUDA PyTorch installed, but torch.cuda.is_available() is still false. Update your NVIDIA GPU drivers (CUDA 12.4+) and retry."
+                    .to_string(),
+            ));
+        }
+        Ok(health)
+    }
+
     pub fn list_presets(&self) -> AppResult<Vec<(String, Value)>> {
         self.db.list_presets()
     }

@@ -60,7 +60,81 @@ pub fn compute_waveform_from_decoded(
     }
 }
 
+fn is_video_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn compute_waveform_via_ffmpeg_pipe(path: &Path, num_buckets: usize) -> AppResult<WaveformSummary> {
+    use std::process::{Command, Stdio};
+
+    let ffmpeg_bin = crate::system::resolve_ffmpeg_path();
+    let mut cmd = Command::new(&ffmpeg_bin);
+    crate::system::silent_command(&mut cmd);
+    let output = cmd
+        .args([
+            "-v",
+            "error",
+            "-i",
+            &path.to_string_lossy(),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-f",
+            "f32le",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| {
+            crate::error::AppError::Audio(format!("Failed to launch FFmpeg for waveform: {}", e))
+        })?;
+
+    if !output.status.success() || output.stdout.len() < 4 {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(crate::error::AppError::Audio(format!(
+            "FFmpeg waveform extraction failed for {}: {}",
+            path.display(),
+            stderr.trim()
+        )));
+    }
+
+    let sample_count = output.stdout.len() / 4;
+    let mut samples = Vec::with_capacity(sample_count);
+    for chunk in output.stdout.chunks_exact(4) {
+        samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+
+    let decoded = DecodedAudio {
+        samples_interleaved: samples,
+        channels: 1,
+        sample_rate: 8000,
+        frames: sample_count,
+    };
+    Ok(compute_waveform_from_decoded(&decoded, num_buckets))
+}
+
 pub fn compute_waveform_8000(path: &Path) -> AppResult<WaveformSummary> {
+    const LARGE_FILE_BYTES: u64 = 40 * 1024 * 1024;
+    let is_large = std::fs::metadata(path)
+        .map(|m| m.len() > LARGE_FILE_BYTES)
+        .unwrap_or(false);
+    if is_video_extension(path) || is_large {
+        if let Ok(summary) = compute_waveform_via_ffmpeg_pipe(path, 8000) {
+            return Ok(summary);
+        }
+    }
     let decoded = decode_audio_file(path)?;
     Ok(compute_waveform_from_decoded(&decoded, 8000))
 }

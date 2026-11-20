@@ -336,24 +336,61 @@ impl WorkerSupervisor {
         }
 
         #[cfg(target_os = "linux")]
-        {
-            let parent_pid = std::process::id() as libc::pid_t;
-            unsafe {
-                use std::os::unix::process::CommandExt;
-                cmd.pre_exec(move || {
-                    let ret = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
-                    if ret != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if libc::getppid() != parent_pid {
-                        libc::_exit(1);
-                    }
-                    Ok(())
-                });
+        let spawn_result = {
+            use std::sync::OnceLock;
+            type SpawnReq = (Command, std::sync::mpsc::SyncSender<std::io::Result<Child>>);
+            static LINUX_SPAWNER: OnceLock<Mutex<std::sync::mpsc::Sender<SpawnReq>>> =
+                OnceLock::new();
+            let tx_lock = LINUX_SPAWNER.get_or_init(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<SpawnReq>();
+                std::thread::Builder::new()
+                    .name("vocalpro-linux-spawner".to_string())
+                    .spawn(move || {
+                        let spawner_pid = std::process::id() as libc::pid_t;
+                        while let Ok((mut c, reply)) = rx.recv() {
+                            unsafe {
+                                use std::os::unix::process::CommandExt;
+                                c.pre_exec(move || {
+                                    let ret = libc::prctl(
+                                        libc::PR_SET_PDEATHSIG,
+                                        libc::SIGTERM as libc::c_ulong,
+                                    );
+                                    if ret != 0 {
+                                        return Err(std::io::Error::last_os_error());
+                                    }
+                                    if libc::getppid() != spawner_pid {
+                                        libc::_exit(1);
+                                    }
+                                    Ok(())
+                                });
+                            }
+                            let _ = reply.send(c.spawn());
+                        }
+                    })
+                    .expect("failed to spawn persistent Linux worker spawner thread");
+                Mutex::new(tx)
+            });
+            let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+            let send_ok = tx_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .send((cmd, reply_tx))
+                .is_ok();
+            if send_ok {
+                reply_rx.recv().unwrap_or_else(|_| {
+                    Err(std::io::Error::other(
+                        "Linux spawner thread disconnected unexpectedly",
+                    ))
+                })
+            } else {
+                Err(std::io::Error::other("Linux spawner channel closed"))
             }
-        }
+        };
 
-        let mut child = cmd.spawn().map_err(|e| {
+        #[cfg(not(target_os = "linux"))]
+        let spawn_result = cmd.spawn();
+
+        let mut child = spawn_result.map_err(|e| {
             let msg = format!(
                 "Failed to spawn python worker slot {} ({:?}): {}",
                 slot_id, self.python_bin, e
@@ -808,7 +845,11 @@ impl WorkerSupervisor {
             }
 
             if let Some(slot_idx) = need_spawn {
-                if let Err(e) = self.spawn_slot(slot_idx) {
+                let sup_clone = self.clone();
+                let spawn_res = tokio::task::spawn_blocking(move || sup_clone.spawn_slot(slot_idx))
+                    .await
+                    .map_err(|e| AppError::System(format!("Worker spawn task panicked: {}", e)))?;
+                if let Err(e) = spawn_res {
                     {
                         let mut guard = self.lock_inner();
                         guard.queue.mark_failed(
@@ -884,7 +925,10 @@ impl WorkerSupervisor {
             guard.slots.is_empty() || !guard.slots[0].running
         };
         if ensure_slot_0 {
-            self.spawn_slot(0)?;
+            let sup_clone = self.clone();
+            tokio::task::spawn_blocking(move || sup_clone.spawn_slot(0))
+                .await
+                .map_err(|e| AppError::System(format!("Worker spawn task panicked: {}", e)))??;
         }
 
         let id = uuid::Uuid::new_v4().to_string();

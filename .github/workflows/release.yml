@@ -85,9 +85,10 @@ jobs:
           Copy-Item $ffmpegExe.FullName -Destination dist\bundle\ffmpeg.exe
           Remove-Item -Recurse -Force ffmpeg_extracted, $ffmpegZip
 
-          # 6. Preload and verify offline Demucs default model weights
+          # 6. Preload and verify offline Demucs default model weights (htdemucs + max-default htdemucs_ft)
           $env:PYTHONPATH = "$PWD\worker"
           & dist\bundle\engine\python.exe -m vocalpro_worker.model_installer htdemucs --target dist\bundle\models
+          & dist\bundle\engine\python.exe -m vocalpro_worker.model_installer htdemucs_ft --target dist\bundle\models
 
           # 7. Copy native Tauri executable to bundle
           Copy-Item src-tauri\target\release\vocalpro.exe -Destination dist\bundle\vocalpro.exe

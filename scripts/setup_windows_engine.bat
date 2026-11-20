@@ -50,11 +50,23 @@ set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 
 echo [3/4] Installing PyTorch Demucs & Studio DSP dependencies...
 "%VENV_PYTHON%" -m pip install --upgrade pip --timeout 120 --retries 5
-"%VENV_PYTHON%" -m pip install torch torchaudio demucs noisereduce soundfile numpy scipy librosa mido resampy platformdirs --timeout 120 --retries 5
+nvidia-smi >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    echo [GPU] NVIDIA GPU detected -- installing CUDA 12.4 GPU-accelerated PyTorch...
+    "%VENV_PYTHON%" -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124 --timeout 120 --retries 5
+    if !ERRORLEVEL! neq 0 (
+        echo [WARN] CUDA PyTorch wheel unavailable; falling back to standard PyTorch...
+        "%VENV_PYTHON%" -m pip install torch torchaudio --timeout 120 --retries 5
+    )
+) else (
+    "%VENV_PYTHON%" -m pip install torch torchaudio --timeout 120 --retries 5
+)
+"%VENV_PYTHON%" -m pip install demucs noisereduce soundfile numpy scipy librosa mido resampy platformdirs --timeout 120 --retries 5
 
 echo [4/4] Pre-installing and verifying default Demucs AI model weights...
 set "PYTHONPATH=%~dp0..\worker"
 "%VENV_PYTHON%" -m vocalpro_worker.model_installer htdemucs
+"%VENV_PYTHON%" -m vocalpro_worker.model_installer htdemucs_ft
 
 echo.
 echo ==============================================================================

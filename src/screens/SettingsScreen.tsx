@@ -43,6 +43,7 @@ export const SettingsScreen: React.FC = () => {
   const maxCacheSizeGb = useSystemStore((s) => s.maxCacheSizeGb);
   const activeProfileMode = useSystemStore((s) => s.activeProfileMode);
   const calibrating = useSystemStore((s) => s.calibrating);
+  const enablingCuda = useSystemStore((s) => s.enablingCuda);
   const lastCalibrationResult = useSystemStore((s) => s.lastCalibrationResult);
   const hardwareProfile = useSystemStore((s) => s.hardwareProfile);
   const health = useSystemStore((s) => s.health);
@@ -65,6 +66,7 @@ export const SettingsScreen: React.FC = () => {
   const setMaxCacheSizeGb = useSystemStore((s) => s.setMaxCacheSizeGb);
   const setPerformanceProfileMode = useSystemStore((s) => s.setPerformanceProfileMode);
   const calibrateHardware = useSystemStore((s) => s.calibrateHardware);
+  const enableCudaEngine = useSystemStore((s) => s.enableCudaEngine);
   const resetSettingKey = useSystemStore((s) => s.resetSettingKey);
   const resetAllSettings = useSystemStore((s) => s.resetAllSettings);
   const exportSettingsJson = useSystemStore((s) => s.exportSettingsJson);
@@ -80,6 +82,14 @@ export const SettingsScreen: React.FC = () => {
   const q = settingsSearchQuery.trim().toLowerCase();
   const matchesSearch = (keywords: string) => !q || keywords.toLowerCase().includes(q);
   const showAdvanced = settingsViewMode === "advanced" || q.length > 0;
+  const hasNvidiaWithoutCuda =
+    !health.cuda_available &&
+    !hardwareProfile.cuda_available &&
+    Boolean(
+      hardwareProfile.non_cuda_gpu_note?.toLowerCase().includes("nvidia") ||
+        hardwareProfile.non_cuda_gpu_name?.toLowerCase().includes("nvidia") ||
+        hardwareProfile.gpu_name?.toLowerCase().includes("nvidia")
+    );
 
   return (
     <div className="space-y-5 pb-12" data-testid="settings-screen">
@@ -270,9 +280,27 @@ export const SettingsScreen: React.FC = () => {
             )}
           </div>
 
-          {hardwareProfile.non_cuda_gpu_note && (
-            <div className="rounded-lg bg-[#FFB800]/15 border border-[#FFB800]/40 px-3 py-2 text-xs text-[#FFB800]">
-              {hardwareProfile.non_cuda_gpu_note}
+          {(hardwareProfile.non_cuda_gpu_note || hasNvidiaWithoutCuda) && (
+            <div className="rounded-lg bg-[#FFB800]/15 border border-[#FFB800]/40 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-[#FFB800]">
+              <div className="flex-1 min-w-[220px]">
+                {hardwareProfile.non_cuda_gpu_note ||
+                  "NVIDIA GPU detected, but the AI engine is currently running on CPU-only PyTorch. Upgrade to CUDA for 10x–30x faster separation."}
+              </div>
+              {hasNvidiaWithoutCuda && (
+                <button
+                  type="button"
+                  disabled={enablingCuda}
+                  onClick={() => void enableCudaEngine()}
+                  className="shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#FFB800] hover:bg-[#FFB800]/90 disabled:opacity-60 text-slate-950 font-bold text-xs transition"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>
+                    {enablingCuda
+                      ? "Installing NVIDIA CUDA Engine..."
+                      : "Enable NVIDIA CUDA GPU Acceleration (10x–30x Faster)"}
+                  </span>
+                </button>
+              )}
             </div>
           )}
 

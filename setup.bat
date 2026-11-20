@@ -45,7 +45,18 @@ if not exist "%VENV_PY%" (
 
 echo [2/4] Installing PyTorch Demucs and audio processing dependencies...
 "%VENV_PY%" -m pip install --upgrade pip --quiet --timeout 120 --retries 5
-"%VENV_PY%" -m pip install torch torchaudio demucs soundfile numpy scipy librosa noisereduce mido resampy platformdirs --quiet --timeout 120 --retries 5
+nvidia-smi >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    echo [GPU] NVIDIA GPU detected -- installing CUDA 12.4 GPU-accelerated PyTorch...
+    "%VENV_PY%" -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124 --quiet --timeout 120 --retries 5
+    if !ERRORLEVEL! neq 0 (
+        echo [WARN] CUDA PyTorch wheel unavailable; falling back to standard PyTorch...
+        "%VENV_PY%" -m pip install torch torchaudio --quiet --timeout 120 --retries 5
+    )
+) else (
+    "%VENV_PY%" -m pip install torch torchaudio --quiet --timeout 120 --retries 5
+)
+"%VENV_PY%" -m pip install demucs soundfile numpy scipy librosa noisereduce mido resampy platformdirs --quiet --timeout 120 --retries 5
 
 echo [3/4] Installing UI dependencies...
 where npm >nul 2>&1
@@ -53,9 +64,9 @@ if %ERRORLEVEL% equ 0 (
     call npm install --quiet
 )
 
-echo [4/4] Pre-caching default Demucs AI model weights...
+echo [4/4] Pre-caching default Demucs AI model weights (htdemucs + htdemucs_ft)...
 set "PYTHONPATH=%~dp0worker"
-"%VENV_PY%" -c "import demucs.pretrained; demucs.pretrained.get_model('htdemucs')" 2>nul
+"%VENV_PY%" -c "import demucs.pretrained; demucs.pretrained.get_model('htdemucs'); demucs.pretrained.get_model('htdemucs_ft')" 2>nul
 if !ERRORLEVEL! neq 0 (
     echo [WARN] Could not verify Demucs weights offline. Check your internet connection or run model setup later.
 ) else (

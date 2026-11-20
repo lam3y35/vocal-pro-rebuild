@@ -324,6 +324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bridge::consume_launch_files,
                 bridge::resolve_sample_track,
                 bridge::download_model,
+                bridge::enable_cuda_engine,
             ])
             .build(tauri::generate_context!())?
             .run({

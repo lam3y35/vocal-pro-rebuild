@@ -624,4 +624,14 @@ pub mod bridge {
         .await
         .map_err(|e| format!("Download model task panicked: {}", e))?
     }
+
+    #[tauri::command]
+    pub async fn enable_cuda_engine(ctx: State<'_, AppContext>) -> Result<WorkerHealth, String> {
+        let ctx_clone = ctx.inner().clone();
+        tokio::task::spawn_blocking(move || {
+            ctx_clone.enable_cuda_engine().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("Enable CUDA task panicked: {}", e))?
+    }
 }

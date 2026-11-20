@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import threading
@@ -11,20 +12,25 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-import torch
-
 from . import __version__
-from .analysis import analyze_audio_file
-from .engine import (
+from .protocol import StdioProtocol, isolate_stdout_fd
+
+# Isolate stdout BEFORE importing torch/demucs/librosa so C/Python startup warnings
+# printed to fd 1 can never corrupt the JSON-Lines protocol handshake.
+_EARLY_PROTO_FD: int | None = isolate_stdout_fd() if __name__ == "__main__" else None
+
+import torch  # noqa: E402
+
+from .analysis import analyze_audio_file  # noqa: E402
+from .engine import (  # noqa: E402
     MODEL_POOL,
     JobCancelledError,
     WorkerEngineError,
     resolve_ffmpeg,
     run_separation_job,
 )
-from .hardware import detect_hardware_profile, run_hardware_calibration
-from .midi import stem_to_midi_file
-from .protocol import StdioProtocol
+from .hardware import detect_hardware_profile, run_hardware_calibration  # noqa: E402
+from .midi import stem_to_midi_file  # noqa: E402
 
 
 def _gpu_info() -> tuple[bool, str | None, int | None]:
@@ -36,15 +42,16 @@ def _gpu_info() -> tuple[bool, str | None, int | None]:
         props = torch.cuda.get_device_properties(0)
         vram_mb = int(props.total_memory // (1024 * 1024))
         return True, name, vram_mb
-    except Exception:
+    except Exception as exc:
+        print(f"[worker] Warning: failed to query CUDA device properties: {exc}", file=sys.stderr)
         return True, "CUDA Device", None
 
 
 class WorkerApp:
     """Persistent JSON-Lines worker handling control commands concurrently with heavy jobs."""
 
-    def __init__(self, isolate_fd: bool = True) -> None:
-        self.proto = StdioProtocol(isolate_fd=isolate_fd)
+    def __init__(self, isolate_fd: bool = True, proto_fd: int | None = None) -> None:
+        self.proto = StdioProtocol(isolate_fd=isolate_fd, proto_fd=proto_fd)
         self._cancel_events: dict[str, threading.Event] = {}
         self._cancel_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vocalpro-job")
@@ -332,7 +339,7 @@ class WorkerApp:
 
 
 def main() -> None:
-    app = WorkerApp(isolate_fd=True)
+    app = WorkerApp(isolate_fd=_EARLY_PROTO_FD is None, proto_fd=_EARLY_PROTO_FD)
     raise SystemExit(app.run_forever())
 
 

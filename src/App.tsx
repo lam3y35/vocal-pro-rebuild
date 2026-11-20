@@ -92,12 +92,12 @@ export const App: React.FC = () => {
     return () => window.removeEventListener("keydown", handler);
   }, [activeJobId, activeScreen, cancelJob, setActiveScreen, startSeparationBatch]);
 
-  // Unified timer-based auto-dismiss for system notification banner (prevents stacking)
+  // Unified timer-based auto-dismiss for non-error notifications (keep errors visible until dismissed)
   useEffect(() => {
-    if (!systemBanner) return;
+    if (!systemBanner || systemBanner.type === "error") return;
     const timer = setTimeout(() => {
       useSystemStore.setState({ systemBanner: null });
-    }, 4500);
+    }, 5500);
     return () => clearTimeout(timer);
   }, [systemBanner]);
 
