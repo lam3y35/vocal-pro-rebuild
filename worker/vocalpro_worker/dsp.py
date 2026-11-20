@@ -269,18 +269,7 @@ def spectral_denoise(
         kwargs["y_noise"] = noise_sample
 
     with np.errstate(invalid="ignore", divide="ignore"):
-        if audio.ndim == 2 and audio.shape[0] > 1:
-            from concurrent.futures import ThreadPoolExecutor
-
-            def _denoise_ch(ch_arr: np.ndarray) -> np.ndarray:
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    return nr.reduce_noise(y=ch_arr, **kwargs)
-
-            with ThreadPoolExecutor(max_workers=audio.shape[0]) as pool:
-                ch_outs = list(pool.map(_denoise_ch, [audio[i] for i in range(audio.shape[0])]))
-            denoised = np.stack(ch_outs, axis=0)
-        else:
-            denoised = nr.reduce_noise(y=audio, **kwargs)
+        denoised = nr.reduce_noise(y=audio, **kwargs)
 
     return denoised.reshape(orig_shape)
 
